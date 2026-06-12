@@ -1,6 +1,7 @@
 #include <doctest.h>
 
-#include "CoroWeaver.hpp"
+// #include "CoroWeaver.hpp"
+#include "coroweaver/CoroWeaver.hpp" // Single include version
 #include <atomic>
 #include <chrono>
 #include <stop_token>
@@ -18,7 +19,6 @@ static void InitJS() {
 
 static void ShutdownJS() {
     JobSystem::Shutdown();
-    // Log::ShutDown();
 }
 
 TEST_CASE("JobSystem - Created correctly") {
@@ -478,7 +478,7 @@ TEST_CASE("JobSystem - convert main thread to worker and run jobs") {
 
     std::stop_source source;
     // Run until job completes, then stop ourselves
-    js.Schedule([&]() { source.request_stop(); });
+    js.Schedule([&]() { source.request_stop(); }, JobPriority::Medium, myIndex);
 
     js.RunWorkerUntil(source.get_token());
 

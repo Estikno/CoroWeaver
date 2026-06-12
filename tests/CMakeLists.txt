@@ -8,7 +8,9 @@ add_executable(tests ${TEST_SOURCES})
 
 target_include_directories(tests PRIVATE
     "${CMAKE_SOURCE_DIR}/vendor/doctest/doctest"
+    "${CMAKE_SOURCE_DIR}/vendor/concurrentqueue"
     "${CMAKE_SOURCE_DIR}/src"
+    "${CMAKE_SOURCE_DIR}/include"
 )
 
 target_link_libraries(tests PRIVATE CoroWeaver::CoroWeaver)

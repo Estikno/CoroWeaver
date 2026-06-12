@@ -8,6 +8,9 @@ files is stripped (the output gets a single one). #include <...>
 (system/vendor) lines are collected, deduplicated, and emitted once
 at the top. // IWYU pragma: lines are scrubbed.
 
+The repo's LICENSE file (if found) is embedded as a comment block
+immediately after the auto-generated banner.
+
 Use --remap to emit #line directives so compiler diagnostics and
 debuggers point back at the original split-file source locations
 instead of the amalgamated output.
@@ -23,7 +26,22 @@ PRAGMA_ONCE_RE = re.compile(r"^\s*#pragma\s+once\s*$")
 IWYU_PRAGMA_RE = re.compile(r"^\s*//\s*IWYU pragma:")
 
 
-def amalgamate(root: Path, entry: str, remap: bool):
+def format_license_block(license_path: Path) -> list[str]:
+    """Render the repo's LICENSE file as a C++ comment block."""
+    text = license_path.read_text(encoding="utf-8")
+
+    lines = ["// " + "─" * 60]
+    lines.append("// LICENSE")
+    lines.append("// " + "─" * 60)
+    for line in text.splitlines():
+        line = line.rstrip()
+        lines.append(f"// {line}" if line else "//")
+    lines.append("// " + "─" * 60)
+    lines.append("")
+    return lines
+
+
+def amalgamate(root: Path, entry: str, remap: bool, license_path: Path | None):
     visited = set()
     system_includes = []  # order-preserving, deduped
     body_lines = []
@@ -82,6 +100,13 @@ def amalgamate(root: Path, entry: str, remap: bool):
         out.append("// Built with --remap: #line directives map diagnostics")
         out.append("// back to the original split-file sources.")
     out.append("// ════════════════════════════════════════════════════════════")
+    out.append("")
+
+    if license_path is not None:
+        if not license_path.is_file():
+            raise FileNotFoundError(f"LICENSE file not found: {license_path}")
+        out.extend(format_license_block(license_path))
+
     out.append("#pragma once")
     out.append("")
     out.extend(system_includes)
@@ -97,12 +122,12 @@ def main():
         "--root",
         required=True,
         type=Path,
-        help="Include root directory (e.g. jobsys/src)",
+        help="Include root directory (e.g. /src)",
     )
     parser.add_argument(
         "--entry",
         required=True,
-        help="Entry header, relative to --root (e.g. jobsys/job_system.hpp)",
+        help="Entry header, relative to --root (e.g. src/job_system.hpp)",
     )
     parser.add_argument(
         "--output", required=True, type=Path, help="Output single-header file path"
@@ -112,15 +137,22 @@ def main():
         action="store_true",
         help="Emit #line directives mapping back to original sources",
     )
+    parser.add_argument(
+        "--license",
+        type=Path,
+        default=None,
+        help="Path to the repo's LICENSE file to embed at the top",
+    )
     args = parser.parse_args()
 
-    result = amalgamate(args.root, args.entry, args.remap)
+    result = amalgamate(args.root, args.entry, args.remap, args.license)
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(result)
     print(
         f"Wrote {args.output} ({len(result.splitlines())} lines)"
         + (" [remapped]" if args.remap else "")
+        + (f" [license: {args.license}]" if args.license else "")
     )
 
 

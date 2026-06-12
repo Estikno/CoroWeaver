@@ -73,7 +73,8 @@ add_custom_target(amalgamate
             "${CMAKE_SOURCE_DIR}/scripts/amalgamate.py"
             --root   "${CMAKE_SOURCE_DIR}/src"
             --entry  "CoroWeaver.hpp"
-            --output "${CMAKE_SOURCE_DIR}/include/CoroWeaver.hpp"
+            --output "${CMAKE_SOURCE_DIR}/include/coroweaver/CoroWeaver.hpp"
+            --license "${CMAKE_SOURCE_DIR}/LICENSE"
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
     COMMENT "Amalgamating job system into single_header/job_system.hpp"
     VERBATIM
@@ -84,7 +85,8 @@ add_custom_target(amalgamate_debug
             "${CMAKE_SOURCE_DIR}/scripts/amalgamate.py"
             --root   "${CMAKE_SOURCE_DIR}/src"
             --entry  "CoroWeaver.hpp"
-            --output "${CMAKE_SOURCE_DIR}/include/CoroWeaver.hpp"
+            --output "${CMAKE_SOURCE_DIR}/include/coroweaver/CoroWeaver.hpp"
+            --license "${CMAKE_SOURCE_DIR}/LICENSE"
             --remap
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
     COMMENT "Amalgamating (with #line remapping) into single_header/job_system.hpp"
