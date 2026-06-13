@@ -1358,6 +1358,8 @@ namespace cw {
                 [&](auto&... coros) {
                     // Set the same priority as the father
                     ((coros.GetHandle().promise().m_Priority = parent->m_Priority), ...);
+
+                    // Set the custom affinity
                     ((coros.GetHandle().promise().m_ThreadIndex = m_ThreadIndex), ...);
 
                     (JobSystem::GetInstance().Schedule(&coros.GetHandle().promise(), parent), ...);
