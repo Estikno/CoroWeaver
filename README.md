@@ -1,4 +1,3 @@
-
 # CoroWeaver
 
 A simple, yet powerfull job system based on coroutines.
@@ -90,28 +89,38 @@ Another thing worth noting is that there can be a maximum of 64 jobs on the loca
 
 Full API (pseudocode):
 
- # Initialization and shutting down of the system
+# Initialization and shutting down of the system
+
  static Init(threadCont) : void
  static Shutdown() : void
- 
- # Gets the instance of the system
+
+# Gets the instance of the system
+
  GetInstance() : JobSystem&
- 
- # Schedule jobs
+
+# Schedule jobs
+
  Schedule(jobFunction, priority, threadId) : void
  Schedule(jobCoroutine, priority, threadId) : void
 
- # Gets the number of worker threads at the moment
+# Gets the number of worker threads at the moment
+
  GetNumThreads() : ThreadAffinity
- # Get the thread id/index of the calling external worker thread
+
+# Get the thread id/index of the calling external worker thread
+
  GetThreadIndex(): ThreadAffinity
- 
- # Convert non-owned threads to worker ones
+
+# Convert non-owned threads to worker ones
+
  ConvertToWorkerThread() : ThreadAffinity
- # After conversion you need to deregister it before shutting down
+
+# After conversion you need to deregister it before shutting down
+
  DeregisterWorkerThread() : void
- 
- # Run external worker threads
+
+# Run external worker threads
+
  RunWorkerUntil(stop_token) : void
  RunWorkerFor(time) : void
 
@@ -130,32 +139,58 @@ cw::JobCoroutine<void> SimpleCoroutineChangeThread(ThreadAffinity thread) {
     co_return;
 }
 
-cw::JobSystem& js = JobSystem::GetInstance();
+// Initialize the system
+cw::JobSystem::Init(2);
+
+cw::JobSystem& js = cw::JobSystem::GetInstance();
 cw::JobCoroutine<void> job = SimpleCoroutineChangeThread(0);
 
 // We schedule the job on thread 1
 js.Schedule(job, 1);
+
+// Shutdown the system
+cw::JobSystem::Shutdown();
 ```
 
 You can always check the available worker threads via the `GetNumThreads()` method and the specific thread index of an external worker thread via `GetThreadIndex` method.
 
-#### Wait on other coroutines
+#### Wait other coroutines to finish before proceeding
 
 Coroutines are also able to wait on other coroutines to finish before continuing. This allows job dependencies to be automatically managed and no busy waiting to happen. This is because while the coroutine is suspended waiting for its dependencies to finish, the thread executing the coroutine is still productive, executing other jobs or sleeping if there is nothing else to do.
 
 If no thread affinity was set when scheduling the coroutine, then it's not guaranteed that the thread executing the coroutine after waiting will be the same as before. This, however, allows for much better performance when thread dependency is not needed.
 
 ```C++
-moodycamel::ConcurrentQueue<int> q;
+using namespace cw;
 
-int items[] = { 1, 2, 3, 4, 5 };
-q.enqueue_bulk(items, 5);
-
-int results[5];     // Could also be any iterator
-size_t count = q.try_dequeue_bulk(results, 5);
-for (size_t i = 0; i != count; ++i) {
-    assert(results[i] == items[i]);
+JobCoroutine<void> Children2() {
+    // Now we are on thread 0
+    co_return;
 }
+
+JobCoroutine<void> Children1() {
+    // Operations on thread 1
+    
+    // Before continuing with the current coroutine we wait on Children2();
+    co_await WhenAll(0, Children2());
+    
+    // We can also wait on multiple children on paralel (No affinity was set in this case):
+    // co_await WhenAll(Children2(), Children3());
+    
+    // We are guarated to still be on thread 1 becaue explicitly set the 
+    // thread affinity of the current coroutine
+    co_return;
+}
+
+// Initialize the system
+JobSystem::Init(2);
+
+JobSystem& js = JobSystem::GetInstance();
+JobCoroutine<void> job = Children1();
+js.Schedule(job, 1);
+
+// Shutdown the system
+JobSystem::Shutdown();
 ```
 
 #### Preallocation (correctly using `try_enqueue`)
@@ -348,7 +383,7 @@ written to be platform-independent, however, and should work across all processo
 Due to the complexity of the implementation and the difficult-to-test nature of lock-free code in general,
 there may still be bugs. If anyone is seeing buggy behaviour, I'd like to hear about it! (Especially if
 a unit test for it can be cooked up.) Just open an issue on GitHub.
- 
+
 ## Using vcpkg
 
 You can download and install `moodycamel::ConcurrentQueue` using the [vcpkg](https://github.com/Microsoft/vcpkg) dependency manager:
@@ -360,7 +395,7 @@ cd vcpkg
 ./vcpkg integrate install
 vcpkg install concurrentqueue
 ```
- 
+
 The `moodycamel::ConcurrentQueue` port in vcpkg is kept up to date by Microsoft team members and community contributors. If the version is out of date, please [create an issue or pull request](https://github.com/Microsoft/vcpkg) on the vcpkg repository.
 
 ## License
