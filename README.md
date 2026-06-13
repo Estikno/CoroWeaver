@@ -89,40 +89,30 @@ Another thing worth noting is that there can be a maximum of 64 jobs on the loca
 
 Full API (pseudocode):
 
-# Initialization and shutting down of the system
+    # Initialization and shutting down of the system
+    static Init(threadCont) : void
+    static Shutdown() : void
 
- static Init(threadCont) : void
- static Shutdown() : void
-
-# Gets the instance of the system
-
- GetInstance() : JobSystem&
-
-# Schedule jobs
-
- Schedule(jobFunction, priority, threadId) : void
- Schedule(jobCoroutine, priority, threadId) : void
-
-# Gets the number of worker threads at the moment
-
- GetNumThreads() : ThreadAffinity
-
-# Get the thread id/index of the calling external worker thread
-
- GetThreadIndex(): ThreadAffinity
-
-# Convert non-owned threads to worker ones
-
- ConvertToWorkerThread() : ThreadAffinity
-
-# After conversion you need to deregister it before shutting down
-
- DeregisterWorkerThread() : void
-
-# Run external worker threads
-
- RunWorkerUntil(stop_token) : void
- RunWorkerFor(time) : void
+    # Gets the instance of the system
+    GetInstance() : JobSystem&
+    
+    # Schedule jobs
+    Schedule(jobFunction, priority, threadId) : void
+    Schedule(jobCoroutine, priority, threadId) : void
+    
+    # Gets the number of worker threads at the moment
+    GetNumThreads() : ThreadAffinity
+    # Get the thread id/index of the calling external worker thread
+    GetThreadIndex(): ThreadAffinity
+    
+    # Convert non-owned threads to worker ones
+    ConvertToWorkerThread() : ThreadAffinity
+    # After conversion you need to deregister it before shutting down
+    DeregisterWorkerThread() : void
+    
+    # Run external worker threads
+    RunWorkerUntil(stop_token) : void
+    RunWorkerFor(time) : void
 
 ## Coroutine features
 
@@ -251,14 +241,14 @@ I haven't written an extended amount of tests, so there might be unknown bugs th
 
 ## License
 
-The source code of this repository has the Apache V2.0 license, you can check the [LICENSE][license] document for more details.
+The source code of this repository has the Apache License V2.0, you can check the [LICENSE][license] document for more details.
 
 As I stated above my implementation depents on moodycamel concurrent queue, which is under a simplified BSD license and dual-licensing under the Boost Software License. See [LICENSE MOODYCAMEL][moodylicense] for more details.
 
 This project also uses Doctest for testing, which is under the MIT license.
 
-[concurrentqueue]:[https://github.com/cameron314/concurrentqueue]
-[NDTalk]:[https://www.gdcvault.com/play/1022186/Parallelizing-the-Naughty-Dog-Engine]
-[Coroweaver.hpp]: test
-[license]: https://github.com/cameron314/concurrentqueue/blob/master/LICENSE.md
+[concurrentqueue]:https://github.com/cameron314/concurrentqueue
+[NDTalk]:https://www.gdcvault.com/play/1022186/Parallelizing-the-Naughty-Dog-Engine
+[Coroweaver.hpp]: https://github.com/Estikno/CoroWeaver/blob/main/include/coroweaver/CoroWeaver.hpp
+[license]: https://github.com/Estikno/CoroWeaver/blob/main/LICENSE
 [moodylicense]:https://github.com/cameron314/concurrentqueue/blob/master/LICENSE.md
