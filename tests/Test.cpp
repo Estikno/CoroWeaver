@@ -1,7 +1,7 @@
 #include <doctest.h>
 
-// #include "CoroWeaver.hpp"
-#include "coroweaver/CoroWeaver.hpp" // Single include version
+#include "CoroWeaver.hpp"
+// #include "coroweaver/CoroWeaver.hpp" // Single include version
 #include <atomic>
 #include <chrono>
 #include <stop_token>
@@ -48,7 +48,7 @@ JobCoroutine<int> SimpleCoroutineInt2() {
 }
 
 JobCoroutine<void> SimpleCoroutineVoid(std::atomic<bool>* excecuted, std::atomic<int>* val) {
-    int a = co_await SimpleCoroutineInt2();
+    auto [a] = co_await WhenAll(SimpleCoroutineInt2());
     val->store(a);
     excecuted->store(true);
     co_return;
@@ -56,7 +56,7 @@ JobCoroutine<void> SimpleCoroutineVoid(std::atomic<bool>* excecuted, std::atomic
 
 JobCoroutine<void> SimpleCoroutineChangeThread(std::atomic<bool>* correct, ThreadAffinity thread) {
     co_await thread;
-    correct->store(JobSystem::GetInstance().GetThreadIndexDEBUG() == thread);
+    correct->store(JobSystem::GetInstance().GetThreadIndex() == thread);
     co_return;
 }
 
@@ -73,6 +73,18 @@ JobCoroutine<void> SimpleCoroutineWaitForMany1(std::atomic<int>* n) {
 JobCoroutine<void> SimpleCoroutineWaitForMany(std::atomic<int>* n, std::atomic<int>* ret1) {
     auto [a, b] = co_await WhenAll(SimpleCoroutineWaitForMany1(n), SimpleCoroutineWaitForMany2(n));
     ret1->store(b);
+    co_return;
+}
+
+JobCoroutine<void> ChildrenExcecuteOnOtherThread2(ThreadAffinity affinity) {
+    CHECK(affinity == JobSystem::GetInstance().GetThreadIndex());
+    co_return;
+}
+
+JobCoroutine<void> ChildrenExcecuteOnOtherThread1(std::atomic<bool>& done, ThreadAffinity affinity) {
+    CHECK(1 == JobSystem::GetInstance().GetThreadIndex());
+    co_await WhenAll(0, ChildrenExcecuteOnOtherThread2(affinity));
+    done.store(true);
     co_return;
 }
 
@@ -209,6 +221,27 @@ TEST_CASE("JobSystem - coroutine that waits multiple jobs simulatenously excecut
     ShutdownJS();
 }
 
+TEST_CASE("JobSystem - coroutine that waits multiple jobs on multiple threads excecutes correctly") {
+    InitJS();
+    JobSystem& js = JobSystem::GetInstance();
+
+    std::atomic<bool> done{false};
+    JobCoroutine<void> job = ChildrenExcecuteOnOtherThread1(done, 0);
+
+    CHECK_NOTHROW(js.Schedule(job, 1));
+
+    auto start = std::chrono::steady_clock::now();
+    while (!done.load()) {
+        std::this_thread::yield();
+        auto elapsed = std::chrono::steady_clock::now() - start;
+        REQUIRE(elapsed < std::chrono::seconds(5)); // fail if takes too long
+    }
+
+    CHECK(done.load());
+
+    ShutdownJS();
+}
+
 // ─────────────────────────────────────────────
 // Priority and ordering
 // ─────────────────────────────────────────────
@@ -265,7 +298,7 @@ TEST_CASE("JobSystem - function job runs on correct thread") {
 
     js.Schedule(
         [&]() {
-            ranOnThread.store(js.GetThreadIndexDEBUG());
+            ranOnThread.store(js.GetThreadIndex());
             done.store(true);
         },
         JobPriority::Medium,
@@ -348,12 +381,12 @@ JobCoroutine<int> ChainedLevel2() {
 }
 
 JobCoroutine<int> ChainedLevel1() {
-    int val = co_await ChainedLevel2();
+    auto [val] = co_await WhenAll(ChainedLevel2());
     co_return val + 1;
 }
 
 JobCoroutine<void> ChainedLevel0(std::atomic<int>* result, std::atomic<bool>* done) {
-    int val = co_await ChainedLevel1();
+    auto [val] = co_await WhenAll(ChainedLevel1());
     result->store(val);
     done->store(true);
     co_return;
@@ -469,7 +502,7 @@ TEST_CASE("JobSystem - convert main thread to worker and run jobs") {
     JobSystem& js = JobSystem::GetInstance();
 
     js.ConvertToWorkerThread();
-    ThreadAffinity myIndex = js.GetThreadIndexDEBUG();
+    ThreadAffinity myIndex = js.GetThreadIndex();
     CHECK(myIndex != InvalidThreadIndex);
     CHECK(myIndex == 2); // initial thread count was 2, so new index should be 2
 
@@ -485,7 +518,7 @@ TEST_CASE("JobSystem - convert main thread to worker and run jobs") {
     CHECK(jobDone.load());
 
     js.DeregisterWorkerThread();
-    CHECK(js.GetThreadIndexDEBUG() == InvalidThreadIndex);
+    CHECK(js.GetThreadIndex() == InvalidThreadIndex);
 
     ShutdownJS();
 }
@@ -513,7 +546,7 @@ TEST_CASE("JobSystem - RunWorkerFor processes jobs scheduled to its index") {
     JobSystem& js = JobSystem::GetInstance();
 
     js.ConvertToWorkerThread();
-    ThreadAffinity myIndex = js.GetThreadIndexDEBUG();
+    ThreadAffinity myIndex = js.GetThreadIndex();
 
     std::atomic<int> counter{0};
     for (int i = 0; i < 5; ++i)
@@ -532,11 +565,11 @@ TEST_CASE("JobSystem - deregistered index gets reused") {
     JobSystem& js = JobSystem::GetInstance();
 
     js.ConvertToWorkerThread();
-    ThreadAffinity firstIndex = js.GetThreadIndexDEBUG();
+    ThreadAffinity firstIndex = js.GetThreadIndex();
     js.DeregisterWorkerThread();
 
     js.ConvertToWorkerThread();
-    ThreadAffinity secondIndex = js.GetThreadIndexDEBUG();
+    ThreadAffinity secondIndex = js.GetThreadIndex();
 
     CHECK_EQ(firstIndex, secondIndex); // index should be reused
 

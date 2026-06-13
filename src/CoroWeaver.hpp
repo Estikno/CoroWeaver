@@ -51,8 +51,6 @@ namespace cw {
     struct JobFunction;
     template <typename T>
     struct FinalAwaiter;
-    template <typename T, typename U>
-    struct JobAwaiter;
     template <typename T, typename... Us>
     struct JobAwaiterMultiple;
     template <typename T>
@@ -177,11 +175,17 @@ namespace cw {
     template <typename... Us>
     struct WhenAllTag {
         std::tuple<JobCoroutine<Us>...> coros;
+        ThreadAffinity m_ThreadIndex{InvalidThreadIndex};
     };
 
     template <typename... Us>
+    WhenAllTag<Us...> WhenAll(ThreadAffinity affinity, JobCoroutine<Us>&&... coros) {
+        return {std::tuple<JobCoroutine<Us>...>(std::move(coros)...), affinity};
+    }
+
+    template <typename... Us>
     WhenAllTag<Us...> WhenAll(JobCoroutine<Us>&&... coros) {
-        return {std::tuple<JobCoroutine<Us>...>(std::move(coros)...)};
+        return {std::tuple<JobCoroutine<Us>...>(std::move(coros)...), InvalidThreadIndex};
     }
 
     /**
@@ -207,20 +211,12 @@ namespace cw {
             // std::terminate();
         }
 
-        template <typename U>
-        JobAwaiter<T, U> await_transform(JobCoroutine<U>& cor) {
-            return JobAwaiter<T, U>(cor);
-        }
-
-        template <typename U>
-        JobAwaiter<T, U> await_transform(JobCoroutine<U>&& cor) {
-            return JobAwaiter<T, U>(std::move(cor));
-        }
-
         template <typename... Us>
         JobAwaiterMultiple<T, Us...> await_transform(WhenAllTag<Us...>&& tag) {
-            return std::apply([](auto&&... coros) { return JobAwaiterMultiple<T, Us...>(std::move(coros)...); },
-                              std::move(tag.coros));
+            ThreadAffinity affinity = tag.m_ThreadIndex;
+            return std::apply(
+                [affinity](auto&&... coros) { return JobAwaiterMultiple<T, Us...>(affinity, std::move(coros)...); },
+                std::move(tag.coros));
         }
 
         ThreadAwaiter<T> await_transform(ThreadAffinity thread) {
@@ -293,9 +289,6 @@ namespace cw {
          * specify will be fully managed by the system. You can later convert already
          * running threads to worker ones but those won't automatically be managed by
          * the system.
-         *
-         * Caution, this system depends on others, so they have to be initialized
-         * before this one.
          *
          * This function is NOT thread safe so it must be called from only one thread
          * and only once to be safe.
@@ -645,12 +638,19 @@ namespace cw {
             return m_NumThreads.load(std::memory_order_acquire);
         }
 
+        /**
+         * Simple method for retreaving the index/id of the calling thread. If the calling thread is not a worker then
+         * it's undifined behavior.
+         *
+         * @returns The thread index/id of the calling thread
+         * */
+        ThreadAffinity GetThreadIndex() const {
+            return m_Index;
+        }
+
 #ifdef CW_TESTING
         const std::vector<std::thread>& GetThreadsDEBUG() const {
             return m_Threads;
-        }
-        ThreadAffinity GetThreadIndexDEBUG() const {
-            return m_Index;
         }
         u64 GetLocalBufferNumDEBUG() const {
             return m_LargestAvailableIndex.load(std::memory_order_acquire);
@@ -661,9 +661,6 @@ namespace cw {
     private:
         template <typename T>
         friend struct FinalAwaiter;
-
-        template <typename T, typename U>
-        friend struct JobAwaiter;
 
         template <typename T, typename... Us>
         friend struct JobAwaiterMultiple;
@@ -917,70 +914,17 @@ namespace cw {
     };
 
     /**
-     * Allows a coroutine to be able to wait on another coroutine
-     * */
-    template <typename T, typename U>
-    struct JobAwaiter {
-        JobCoroutine<U> m_Coro;     // owned copy (rvalue case)
-        JobPromise<U>* m_JobToWait; // non-owning (lvalue case)
-
-        // Lvalue version - cor is kept alive by the caller
-        JobAwaiter<T, U>(JobCoroutine<U>& cor)
-            : m_Coro{},
-              m_JobToWait(&cor.GetHandle().promise()) {}
-
-        // Rvalue version - takes ownership so the temporary stays alive
-        JobAwaiter<T, U>(JobCoroutine<U>&& cor)
-            : m_Coro(std::move(cor)),
-              m_JobToWait(nullptr) // will use m_Coro directly
-        {}
-
-        // Delete move/copy to prevent pointer invalidation
-        JobAwaiter(const JobAwaiter&) = delete;
-        JobAwaiter& operator=(const JobAwaiter&) = delete;
-        JobAwaiter(JobAwaiter&&) = delete;
-        JobAwaiter& operator=(JobAwaiter&&) = delete;
-
-        /**
-         * Little helper function used to get the promise
-         * */
-        JobPromise<U>* GetPromise() {
-            // If we own the coro, reach through it; otherwise use the raw pointer
-            if (m_Coro.GetHandle())
-                return &m_Coro.GetHandle().promise();
-            return m_JobToWait;
-        }
-
-        // Always suspend
-        bool await_ready() noexcept {
-            return false;
-        }
-
-        void await_suspend(std::coroutine_handle<JobPromise<T>> h) noexcept {
-            Job* parent = &h.promise();
-            // Schedule the job
-            parent->m_Children.fetch_add(1, std::memory_order_release);
-            JobSystem::GetInstance().Schedule(GetPromise(), parent);
-        }
-
-        U await_resume() noexcept {
-            if constexpr (!std::is_void_v<U>) {
-                return GetPromise()->Get();
-                // cor's destructor will handle Destroy()
-            }
-        }
-    };
-
-    /**
      * Allows a coroutine to wait on multiple coroutines
      * */
     template <typename T, typename... Us>
     struct JobAwaiterMultiple {
         std::tuple<JobCoroutine<Us>...> m_Coros;
+        ThreadAffinity m_ThreadIndex;
 
         // Only accept rvalues for better convenience
-        JobAwaiterMultiple(JobCoroutine<Us>&&... coros)
-            : m_Coros(std::move(coros)...) {}
+        JobAwaiterMultiple(ThreadAffinity affinity, JobCoroutine<Us>&&... coros)
+            : m_ThreadIndex(affinity),
+              m_Coros(std::move(coros)...) {}
 
         // Delete move/copy for same reason as JobAwaiter
         JobAwaiterMultiple(const JobAwaiterMultiple&) = delete;
@@ -1001,7 +945,13 @@ namespace cw {
 
             // Schedule all children
             std::apply(
-                [&](auto&... coros) { (JobSystem::GetInstance().Schedule(&coros.GetHandle().promise(), parent), ...); },
+                [&](auto&... coros) {
+                    // Set the same priority as the father
+                    ((coros.GetHandle().promise().m_Priority = parent->m_Priority), ...);
+                    ((coros.GetHandle().promise().m_ThreadIndex = m_ThreadIndex), ...);
+
+                    (JobSystem::GetInstance().Schedule(&coros.GetHandle().promise(), parent), ...);
+                },
                 m_Coros);
         }
 
