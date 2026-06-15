@@ -3,6 +3,8 @@
 #include <condition_variable>
 #include <memory>
 #include <functional>
+#include <shared_mutex>
+#include <unordered_map>
 #include <utility>
 #include <algorithm>
 #include <queue>
@@ -91,7 +93,7 @@ namespace cw {
         }
 
         /**
-         * Same as init but for destroying and cleaning everything.
+         * Same as Init but for destroying and cleaning everything.
          * This function is NOT thread safe so it must be called from only one thread
          * and only once to be safe.
          * */
@@ -271,6 +273,30 @@ namespace cw {
         }
 
         /**
+         * Schedules all the jobs assigned to the specified tag. The jobs are scheduled according to the values passed
+         * when scheduling them.
+         *
+         * @param tag The tag to schedule
+         *
+         * Thread safe
+         * */
+        void ScheduleTag(Tag tag) {
+            if (tag == InvalidTag)
+                return;
+
+            std::shared_lock lock(m_TagBuffersMutex);
+
+            // The tag doesn't exist
+            if (!m_TagBuffers.contains(tag))
+                return;
+
+            Job* job;
+            while (m_TagBuffers[tag]->Pop(job)) {
+                Schedule(job, nullptr);
+            }
+        }
+
+        /**
          * Assumes the calling thread has already been converted to a worker, if not
          * it will panic. The caller thread will work until the the stop_source
          * requests a stop. Stopping may take some time as it may happen that the
@@ -445,7 +471,33 @@ namespace cw {
             // Set parent
             job->m_Parent = parent;
 
-            // TODO: Schedule the job to a specific tag if it has one
+            Tag tag = job->m_Tag;
+            // Schedule the job to a specific tag if it has one
+            if (tag != InvalidTag) {
+                {
+                    std::shared_lock lock(m_TagBuffersMutex);
+
+                    // Create the buffer which contains the tag if it doesn't exist
+                    if (!m_TagBuffers.contains(tag)) {
+                        // We acquire in unique mode
+                        lock.unlock();
+                        std::unique_lock lockUnique(m_TagBuffersMutex);
+
+                        // Someone may already have inserted the buffer
+                        if (!m_TagBuffers.contains(tag)) {
+                            m_TagBuffers[tag] = std::make_unique<RingBuffer<Job*, BufferCapacity>>();
+                        }
+                    }
+                    // We unlocked the unique_lock and now we relock in shared mode
+                    lock.lock();
+
+                    // Invalidate tag so that when the tag schedules this job schedules succesfully
+                    job->m_Tag = InvalidTag;
+
+                    CW_ENSURE(m_TagBuffers[tag]->Push(job), "The internal RingBuffer of the seleted tag is full");
+                }
+                return;
+            }
 
             // The thread matters
             if (job->m_ThreadIndex != InvalidThreadIndex) {
@@ -613,6 +665,9 @@ namespace cw {
         // Buffers
         std::array<moodycamel::ConcurrentQueue<Job*>, 3> m_JobBuffers;
         std::array<JobBufferPtr<Job*>, MaxThreads> m_JobLocalBuffers{};
+
+        std::unordered_map<Tag, JobBufferPtr<Job*>> m_TagBuffers;
+        std::shared_mutex m_TagBuffersMutex;
 
         std::vector<std::thread> m_Threads;
 
