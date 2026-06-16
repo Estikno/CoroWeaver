@@ -8,6 +8,7 @@ A simple, yet powerful job system based on coroutines.
 - Use coroutines for more complex jobs, and functions for simpler and faster ones
 - Non-owned threads can also participate in job execution
 - 3 available priorities (low, medium, high)
+- Assign tags to jobs for better synchronization
 - Custom thread affinity
 - Fully templated
 - Platform independent (no assembly; all is done through standard C++20 primitives).
@@ -17,7 +18,6 @@ A simple, yet powerful job system based on coroutines.
 - Add your custom memory allocators
 - Expand local thread buffers in size as needed
 - Support fast bulk operations
-- Assign tags to jobs for better synchronization
 - Fully independent implementation (without external dependencies)
 - Fully exception safe.
 
