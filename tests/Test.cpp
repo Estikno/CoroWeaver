@@ -246,17 +246,63 @@ TEST_CASE("JobSystem - coroutine that waits multiple jobs on multiple threads ex
 // Priority and ordering
 // ─────────────────────────────────────────────
 
-TEST_CASE("JobSystem - high priority job executes before low priority") {
+// TEST_CASE("JobSystem - high priority job executes before low priority") {
+//     InitJS();
+//     JobSystem& js = JobSystem::GetInstance();
+//
+//     // Fill threads with blocking jobs so we can queue up prioritized work
+//     std::atomic<bool> gate{false};
+//     std::atomic<int> executionOrder{0};
+//     std::atomic<int> lowOrder{-1};
+//     std::atomic<int> highOrder{-1};
+//
+//     // Block all threads first
+//     for (int i = 0; i < 2; ++i) {
+//         js.Schedule([&gate]() {
+//             while (!gate.load(std::memory_order_acquire))
+//                 std::this_thread::yield();
+//         });
+//     }
+//
+//     // Small sleep to let blocking jobs occupy threads
+//     std::this_thread::sleep_for(std::chrono::milliseconds(10));
+//
+//     // Queue low then high
+//     js.Schedule([&]() { lowOrder.store(executionOrder.fetch_add(1)); }, JobPriority::Low);
+//     js.Schedule([&]() { highOrder.store(executionOrder.fetch_add(1)); }, JobPriority::High);
+//
+//     // Release the gate
+//     gate.store(true, std::memory_order_release);
+//
+//     auto start = std::chrono::steady_clock::now();
+//     while (lowOrder.load() == -1 || highOrder.load() == -1) {
+//         std::this_thread::yield();
+//         REQUIRE(std::chrono::steady_clock::now() - start < std::chrono::seconds(5));
+//     }
+//
+//     CHECK(highOrder.load() < lowOrder.load());
+//
+//     ShutdownJS();
+// }
+
+TEST_CASE("JobSystem - high priority batch finishes before low priority batch") {
     InitJS();
     JobSystem& js = JobSystem::GetInstance();
 
-    // Fill threads with blocking jobs so we can queue up prioritized work
+    constexpr int N = 50;
+
     std::atomic<bool> gate{false};
     std::atomic<int> executionOrder{0};
-    std::atomic<int> lowOrder{-1};
-    std::atomic<int> highOrder{-1};
 
-    // Block all threads first
+    // -1 = not yet run
+    std::atomic<int> highOrders[N];
+    std::atomic<int> lowOrders[N];
+    for (int i = 0; i < N; ++i) {
+        highOrders[i].store(-1);
+        lowOrders[i].store(-1);
+    }
+
+    // Block all threads so we can fill the queues before anything runs
     for (int i = 0; i < 2; ++i) {
         js.Schedule([&gate]() {
             while (!gate.load(std::memory_order_acquire))
@@ -264,23 +310,44 @@ TEST_CASE("JobSystem - high priority job executes before low priority") {
         });
     }
 
-    // Small sleep to let blocking jobs occupy threads
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
 
-    // Queue low then high
-    js.Schedule([&]() { lowOrder.store(executionOrder.fetch_add(1)); }, JobPriority::Low);
-    js.Schedule([&]() { highOrder.store(executionOrder.fetch_add(1)); }, JobPriority::High);
+    // Queue all low-priority first, then all high-priority
+    // This makes the test maximally adversarial: if priority is ignored,
+    // low jobs would tend to run first since they were enqueued first
+    for (int i = 0; i < N; ++i)
+        js.Schedule([&, i]() { lowOrders[i].store(executionOrder.fetch_add(1)); }, JobPriority::Low);
+    for (int i = 0; i < N; ++i)
+        js.Schedule([&, i]() { highOrders[i].store(executionOrder.fetch_add(1)); }, JobPriority::High);
 
-    // Release the gate
     gate.store(true, std::memory_order_release);
 
     auto start = std::chrono::steady_clock::now();
-    while (lowOrder.load() == -1 || highOrder.load() == -1) {
+    while (true) {
         std::this_thread::yield();
         REQUIRE(std::chrono::steady_clock::now() - start < std::chrono::seconds(5));
+
+        bool allDone = true;
+        for (int i = 0; i < N; ++i) {
+            if (highOrders[i].load() == -1 || lowOrders[i].load() == -1) {
+                allDone = false;
+                break;
+            }
+        }
+        if (allDone)
+            break;
     }
 
-    CHECK(highOrder.load() < lowOrder.load());
+    // Find the last high-priority execution order and the first low-priority one
+    int lastHigh = -1;
+    for (int i = 0; i < N; ++i)
+        lastHigh = std::max(lastHigh, highOrders[i].load());
+
+    int firstLow = std::numeric_limits<int>::max();
+    for (int i = 0; i < N; ++i)
+        firstLow = std::min(firstLow, lowOrders[i].load());
+
+    CHECK(lastHigh < firstLow);
 
     ShutdownJS();
 }
