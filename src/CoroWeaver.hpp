@@ -273,8 +273,8 @@ namespace cw {
         }
 
         /**
-         * Schedules all the jobs assigned to the specified tag. The jobs are scheduled according to the values passed
-         * when scheduling them.
+         * Schedules all the jobs assigned to the specified tag. The jobs are scheduled according to the parameters
+         * passed when scheduling them (thread affinity, priority, etc).
          *
          * @param tag The tag to schedule
          *
@@ -284,16 +284,22 @@ namespace cw {
             if (tag == InvalidTag)
                 return;
 
-            std::shared_lock lock(m_TagBuffersMutex);
+            std::vector<Job*> toSchedule;
 
-            // The tag doesn't exist
-            if (!m_TagBuffers.contains(tag))
-                return;
+            {
+                std::shared_lock lock(m_TagBuffersMutex);
 
-            Job* job;
-            while (m_TagBuffers[tag]->Pop(job)) {
-                Schedule(job, nullptr);
+                // The tag doesn't exist
+                if (!m_TagBuffers.contains(tag))
+                    return;
+
+                Job* job;
+                while (m_TagBuffers.at(tag)->Pop(job))
+                    toSchedule.push_back(job);
             }
+
+            for (Job* job : toSchedule)
+                Schedule(job, nullptr);
         }
 
         /**
@@ -474,29 +480,30 @@ namespace cw {
             Tag tag = job->m_Tag;
             // Schedule the job to a specific tag if it has one
             if (tag != InvalidTag) {
+                // Fast path: tag already exists
                 {
                     std::shared_lock lock(m_TagBuffersMutex);
 
-                    // Create the buffer which contains the tag if it doesn't exist
-                    if (!m_TagBuffers.contains(tag)) {
-                        // We acquire in unique mode
-                        lock.unlock();
-                        std::unique_lock lockUnique(m_TagBuffersMutex);
-
-                        // Someone may already have inserted the buffer
-                        if (!m_TagBuffers.contains(tag)) {
-                            m_TagBuffers[tag] = std::make_unique<RingBuffer<Job*, BufferCapacity>>();
-                        }
+                    if (m_TagBuffers.contains(tag)) {
+                        job->m_Tag = InvalidTag;
+                        CW_ENSURE(m_TagBuffers.at(tag)->Push(job), "...");
+                        return;
                     }
-                    // We unlocked the unique_lock and now we relock in shared mode
-                    lock.lock();
-
-                    // Invalidate tag so that when the tag schedules this job schedules succesfully
-                    job->m_Tag = InvalidTag;
-
-                    CW_ENSURE(m_TagBuffers[tag]->Push(job), "The internal RingBuffer of the seleted tag is full");
                 }
-                return;
+
+                // Slow path: need to create it
+                {
+                    std::unique_lock lock(m_TagBuffersMutex);
+
+                    // We double check because some thread might have already crated the tag buffer
+                    if (!m_TagBuffers.contains(tag)) {
+                        m_TagBuffers[tag] = std::make_unique<RingBuffer<Job*, TagBufferCapacity>>();
+                    }
+
+                    job->m_Tag = InvalidTag;
+                    CW_ENSURE(m_TagBuffers.at(tag)->Push(job), "...");
+                    return;
+                }
             }
 
             // The thread matters
@@ -666,7 +673,7 @@ namespace cw {
         std::array<moodycamel::ConcurrentQueue<Job*>, 3> m_JobBuffers;
         std::array<JobBufferPtr<Job*>, MaxThreads> m_JobLocalBuffers{};
 
-        std::unordered_map<Tag, JobBufferPtr<Job*>> m_TagBuffers;
+        std::unordered_map<Tag, TagBufferPtr<Job*>> m_TagBuffers;
         std::shared_mutex m_TagBuffersMutex;
 
         std::vector<std::thread> m_Threads;

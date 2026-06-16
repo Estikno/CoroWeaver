@@ -214,13 +214,14 @@
 #include <condition_variable>
 #include <memory>
 #include <functional>
+#include <shared_mutex>
+#include <unordered_map>
 #include <utility>
 #include <algorithm>
 #include <queue>
 #include <vector>
 #include <array>
 #include <type_traits>
-#include <limits>
 #include <variant>
 #include <tuple>
 #include <bit>
@@ -233,6 +234,7 @@
 #include <concurrentqueue.hpp>
 #include <cstdint>
 #include <semaphore>
+#include <limits>
 
 // ─────────────────────────────────────────────
 // CoroWeaver.hpp
@@ -439,16 +441,30 @@ namespace cw {
     }
 } // namespace cw
 
+// ─────────────────────────────────────────────
+// Job.hpp
+// ─────────────────────────────────────────────
+
+
+
+
 namespace cw {
     // Useful defines
+    // TODO: Make this static values defined by the user
     inline static constexpr u32 BufferCapacity = 64;
+    inline static constexpr u32 TagBufferCapacity = 256;
+
     using ThreadAffinity = u8;
     enum class JobPriority { Low = 0, Medium, High };
     template <typename T>
     using JobBufferPtr = std::unique_ptr<RingBuffer<T, BufferCapacity>>;
+    template <typename T>
+    using TagBufferPtr = std::unique_ptr<RingBuffer<T, TagBufferCapacity>>;
+    using Tag = u8;
 
     constexpr ThreadAffinity InvalidThreadIndex = std::numeric_limits<ThreadAffinity>::max();
     constexpr ThreadAffinity MaxThreads = 64;
+    constexpr Tag InvalidTag = std::numeric_limits<Tag>::max();
 
     // Forward declarations
     struct Job;
@@ -473,6 +489,7 @@ namespace cw {
         JobPriority m_Priority{JobPriority::Medium};
         ThreadAffinity m_ThreadIndex{InvalidThreadIndex};
         bool m_IsFunction{true};
+        Tag m_Tag{InvalidTag};
 
         // Who is waiting for me (only on coroutines)
         Job* m_Parent{nullptr};
@@ -480,10 +497,11 @@ namespace cw {
         std::atomic<u32> m_Children{0};
 
         Job() = default;
-        Job(JobPriority priority, ThreadAffinity threadIndex, bool isFunction)
+        Job(JobPriority priority, ThreadAffinity threadIndex, bool isFunction, Tag tag)
             : m_Priority(priority),
               m_ThreadIndex(threadIndex),
-              m_IsFunction(isFunction) {}
+              m_IsFunction(isFunction),
+              m_Tag(tag) {}
         virtual ~Job() = default;
 
         virtual void Resume() = 0;
@@ -499,9 +517,10 @@ namespace cw {
         JobFunction() = default;
         JobFunction(std::function<void()> func,
                     JobPriority priority = JobPriority::Medium,
-                    ThreadAffinity threadIndex = InvalidThreadIndex)
+                    ThreadAffinity threadIndex = InvalidThreadIndex,
+                    Tag tag = InvalidTag)
             : m_Function(func),
-              Job(priority, threadIndex, true) {}
+              Job(priority, threadIndex, true, tag) {}
 
         void Resume() override {
             m_Function();
@@ -607,7 +626,7 @@ namespace cw {
     public:
         JobPromiseBase(std::coroutine_handle<> handle)
             : m_Handle(handle),
-              Job(JobPriority::Medium, InvalidThreadIndex, false) {}
+              Job(JobPriority::Medium, InvalidThreadIndex, false, InvalidTag) {}
 
         std::suspend_always initial_suspend() noexcept {
             return {};
@@ -680,7 +699,9 @@ namespace cw {
 
         void return_void() {}
     };
+} // namespace cw
 
+namespace cw {
     class JobSystem {
     public:
         JobSystem(const JobSystem& other) = delete;
@@ -742,7 +763,7 @@ namespace cw {
         }
 
         /**
-         * Same as init but for destroying and cleaning everything.
+         * Same as Init but for destroying and cleaning everything.
          * This function is NOT thread safe so it must be called from only one thread
          * and only once to be safe.
          * */
@@ -877,8 +898,10 @@ namespace cw {
          * */
         void Schedule(std::function<void()> job,
                       JobPriority priority = JobPriority::Medium,
-                      ThreadAffinity threadId = InvalidThreadIndex) {
-            Schedule(new JobFunction(job, priority, threadId), nullptr);
+                      ThreadAffinity threadId = InvalidThreadIndex,
+                      Tag tag = InvalidTag) {
+            // Functions shall never have a parent
+            Schedule(new JobFunction(job, priority, threadId, tag), nullptr);
         }
 
         /**
@@ -899,13 +922,15 @@ namespace cw {
         template <typename T>
         void Schedule(JobCoroutine<T>& job,
                       ThreadAffinity threadId = InvalidThreadIndex,
-                      JobPriority priority = JobPriority::Medium) {
+                      JobPriority priority = JobPriority::Medium,
+                      Tag tag = InvalidTag) {
             // The underlying job promise
             JobPromise<T>* jobProm = &job.GetHandle().promise();
 
             // Assign given values to the promise
             jobProm->m_Priority = priority;
             jobProm->m_ThreadIndex = threadId;
+            jobProm->m_Tag = tag;
 
             // Notify the coroutine object that the job has been scheduled
             job.Schedule();
@@ -913,8 +938,38 @@ namespace cw {
             // so the destructor can't touch the freed frame after FinalAwaiter runs
             job.ReleaseHandle();
 
-            // Top level jobs can't have a parent
+            // Top level coroutines can't have a parent
             Schedule(jobProm, nullptr);
+        }
+
+        /**
+         * Schedules all the jobs assigned to the specified tag. The jobs are scheduled according to the parameters
+         * passed when scheduling them (thread affinity, priority, etc).
+         *
+         * @param tag The tag to schedule
+         *
+         * Thread safe
+         * */
+        void ScheduleTag(Tag tag) {
+            if (tag == InvalidTag)
+                return;
+
+            std::vector<Job*> toSchedule;
+
+            {
+                std::shared_lock lock(m_TagBuffersMutex);
+
+                // The tag doesn't exist
+                if (!m_TagBuffers.contains(tag))
+                    return;
+
+                Job* job;
+                while (m_TagBuffers.at(tag)->Pop(job))
+                    toSchedule.push_back(job);
+            }
+
+            for (Job* job : toSchedule)
+                Schedule(job, nullptr);
         }
 
         /**
@@ -1092,6 +1147,35 @@ namespace cw {
             // Set parent
             job->m_Parent = parent;
 
+            Tag tag = job->m_Tag;
+            // Schedule the job to a specific tag if it has one
+            if (tag != InvalidTag) {
+                // Fast path: tag already exists
+                {
+                    std::shared_lock lock(m_TagBuffersMutex);
+
+                    if (m_TagBuffers.contains(tag)) {
+                        job->m_Tag = InvalidTag;
+                        CW_ENSURE(m_TagBuffers.at(tag)->Push(job), "...");
+                        return;
+                    }
+                }
+
+                // Slow path: need to create it
+                {
+                    std::unique_lock lock(m_TagBuffersMutex);
+
+                    // We double check because some thread might have already crated the tag buffer
+                    if (!m_TagBuffers.contains(tag)) {
+                        m_TagBuffers[tag] = std::make_unique<RingBuffer<Job*, TagBufferCapacity>>();
+                    }
+
+                    job->m_Tag = InvalidTag;
+                    CW_ENSURE(m_TagBuffers.at(tag)->Push(job), "...");
+                    return;
+                }
+            }
+
             // The thread matters
             if (job->m_ThreadIndex != InvalidThreadIndex) {
                 CW_ENSURE(job->m_ThreadIndex < m_LargestAvailableIndex.load(std::memory_order_acquire),
@@ -1258,6 +1342,9 @@ namespace cw {
         // Buffers
         std::array<moodycamel::ConcurrentQueue<Job*>, 3> m_JobBuffers;
         std::array<JobBufferPtr<Job*>, MaxThreads> m_JobLocalBuffers{};
+
+        std::unordered_map<Tag, TagBufferPtr<Job*>> m_TagBuffers;
+        std::shared_mutex m_TagBuffersMutex;
 
         std::vector<std::thread> m_Threads;
 

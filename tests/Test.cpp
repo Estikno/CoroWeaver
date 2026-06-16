@@ -688,3 +688,224 @@ TEST_CASE("JobSystem - shutdown waits for external worker to deregister (now wit
     realExternal.join();
     // externalWorker.join();
 }
+
+// ─────────────────────────────────────────────
+// Tag scheduling
+// ─────────────────────────────────────────────
+
+JobCoroutine<void> TaggedCoroutine(std::atomic<int>* counter) {
+    counter->fetch_add(1);
+    co_return;
+}
+
+TEST_CASE("JobSystem - tagged function job does not execute until tag is scheduled") {
+    InitJS();
+    JobSystem& js = JobSystem::GetInstance();
+
+    std::atomic<bool> executed{false};
+
+    js.Schedule([&]() { executed.store(true); }, JobPriority::Medium, InvalidThreadIndex, 42);
+
+    // Give workers time to (incorrectly) run it
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    CHECK_FALSE(executed.load());
+
+    js.ScheduleTag(42);
+
+    auto start = std::chrono::steady_clock::now();
+    while (!executed.load()) {
+        std::this_thread::yield();
+        REQUIRE(std::chrono::steady_clock::now() - start < std::chrono::seconds(5));
+    }
+
+    CHECK(executed.load());
+    ShutdownJS();
+}
+
+TEST_CASE("JobSystem - tagged coroutine does not execute until tag is scheduled") {
+    InitJS();
+    JobSystem& js = JobSystem::GetInstance();
+
+    std::atomic<int> counter{0};
+    JobCoroutine<void> job = TaggedCoroutine(&counter);
+
+    js.Schedule(job, InvalidThreadIndex, JobPriority::Medium, 42);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    CHECK_EQ(counter.load(), 0);
+
+    js.ScheduleTag(42);
+
+    auto start = std::chrono::steady_clock::now();
+    while (counter.load() == 0) {
+        std::this_thread::yield();
+        REQUIRE(std::chrono::steady_clock::now() - start < std::chrono::seconds(5));
+    }
+
+    CHECK_EQ(counter.load(), 1);
+    ShutdownJS();
+}
+
+TEST_CASE("JobSystem - multiple jobs under the same tag all fire together") {
+    InitJS();
+    JobSystem& js = JobSystem::GetInstance();
+
+    constexpr int N = 5;
+    std::atomic<int> counter{0};
+
+    for (int i = 0; i < N; ++i)
+        js.Schedule([&]() { counter.fetch_add(1); }, JobPriority::Medium, InvalidThreadIndex, 99);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    CHECK_EQ(counter.load(), 0);
+
+    js.ScheduleTag(99);
+
+    auto start = std::chrono::steady_clock::now();
+    while (counter.load() < N) {
+        std::this_thread::yield();
+        REQUIRE(std::chrono::steady_clock::now() - start < std::chrono::seconds(5));
+    }
+
+    CHECK_EQ(counter.load(), N);
+    ShutdownJS();
+}
+
+TEST_CASE("JobSystem - jobs under different tags are independent") {
+    InitJS();
+    JobSystem& js = JobSystem::GetInstance();
+
+    std::atomic<int> counterA{0};
+    std::atomic<int> counterB{0};
+
+    js.Schedule([&]() { counterA.fetch_add(1); }, JobPriority::Medium, InvalidThreadIndex, 1);
+    js.Schedule([&]() { counterB.fetch_add(1); }, JobPriority::Medium, InvalidThreadIndex, 2);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    CHECK_EQ(counterA.load(), 0);
+    CHECK_EQ(counterB.load(), 0);
+
+    js.ScheduleTag(1);
+
+    auto start = std::chrono::steady_clock::now();
+    while (counterA.load() == 0) {
+        std::this_thread::yield();
+        REQUIRE(std::chrono::steady_clock::now() - start < std::chrono::seconds(5));
+    }
+
+    CHECK_EQ(counterA.load(), 1);
+    // Tag 2 was never scheduled, B must still be 0
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    CHECK_EQ(counterB.load(), 0);
+
+    js.ScheduleTag(2);
+
+    start = std::chrono::steady_clock::now();
+    while (counterB.load() == 0) {
+        std::this_thread::yield();
+        REQUIRE(std::chrono::steady_clock::now() - start < std::chrono::seconds(5));
+    }
+
+    CHECK_EQ(counterB.load(), 1);
+    ShutdownJS();
+}
+
+TEST_CASE("JobSystem - scheduling InvalidTag is a no-op") {
+    InitJS();
+    JobSystem& js = JobSystem::GetInstance();
+
+    // Should not panic or do anything observable
+    CHECK_NOTHROW(js.ScheduleTag(InvalidTag));
+
+    ShutdownJS();
+}
+
+TEST_CASE("JobSystem - scheduling a tag that has no jobs is a no-op") {
+    InitJS();
+    JobSystem& js = JobSystem::GetInstance();
+
+    CHECK_NOTHROW(js.ScheduleTag(123));
+
+    ShutdownJS();
+}
+
+TEST_CASE("JobSystem - tag can be scheduled multiple times, second fire is a no-op") {
+    InitJS();
+    JobSystem& js = JobSystem::GetInstance();
+
+    std::atomic<int> counter{0};
+    js.Schedule([&]() { counter.fetch_add(1); }, JobPriority::Medium, InvalidThreadIndex, 7);
+
+    js.ScheduleTag(7);
+
+    auto start = std::chrono::steady_clock::now();
+    while (counter.load() == 0) {
+        std::this_thread::yield();
+        REQUIRE(std::chrono::steady_clock::now() - start < std::chrono::seconds(5));
+    }
+
+    CHECK_EQ(counter.load(), 1);
+
+    // Fire again — buffer was drained, nothing should execute
+    js.ScheduleTag(7);
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    CHECK_EQ(counter.load(), 1);
+
+    ShutdownJS();
+}
+
+TEST_CASE("JobSystem - tagged job respects thread affinity when fired") {
+    InitJS();
+    JobSystem& js = JobSystem::GetInstance();
+
+    std::atomic<ThreadAffinity> ranOn{InvalidThreadIndex};
+    std::atomic<bool> done{false};
+
+    js.Schedule(
+        [&]() {
+            ranOn.store(js.GetThreadIndex());
+            done.store(true);
+        },
+        JobPriority::Medium,
+        /*threadId=*/1,
+        /*tag=*/55);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    CHECK_FALSE(done.load());
+
+    js.ScheduleTag(55);
+
+    auto start = std::chrono::steady_clock::now();
+    while (!done.load()) {
+        std::this_thread::yield();
+        REQUIRE(std::chrono::steady_clock::now() - start < std::chrono::seconds(5));
+    }
+
+    CHECK_EQ(ranOn.load(), 1);
+    ShutdownJS();
+}
+
+TEST_CASE("JobSystem - many tagged jobs stress test") {
+    InitJS();
+    JobSystem& js = JobSystem::GetInstance();
+
+    constexpr int N = 200; // well within the 256 capacity
+    std::atomic<int> counter{0};
+
+    for (int i = 0; i < N; ++i)
+        js.Schedule([&]() { counter.fetch_add(1); }, JobPriority::Medium, InvalidThreadIndex, 88);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    CHECK_EQ(counter.load(), 0);
+
+    js.ScheduleTag(88);
+
+    auto start = std::chrono::steady_clock::now();
+    while (counter.load() < N) {
+        std::this_thread::yield();
+        REQUIRE(std::chrono::steady_clock::now() - start < std::chrono::seconds(10));
+    }
+
+    CHECK_EQ(counter.load(), N);
+    ShutdownJS();
+}

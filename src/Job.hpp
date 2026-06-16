@@ -11,12 +11,16 @@
 
 namespace cw {
     // Useful defines
+    // TODO: Make this static values defined by the user
     inline static constexpr u32 BufferCapacity = 64;
+    inline static constexpr u32 TagBufferCapacity = 256;
 
     using ThreadAffinity = u8;
     enum class JobPriority { Low = 0, Medium, High };
     template <typename T>
     using JobBufferPtr = std::unique_ptr<RingBuffer<T, BufferCapacity>>;
+    template <typename T>
+    using TagBufferPtr = std::unique_ptr<RingBuffer<T, TagBufferCapacity>>;
     using Tag = u8;
 
     constexpr ThreadAffinity InvalidThreadIndex = std::numeric_limits<ThreadAffinity>::max();
