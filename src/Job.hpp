@@ -15,15 +15,18 @@ namespace cw {
     inline static constexpr u32 BufferCapacity = 64;
     inline static constexpr u32 TagBufferCapacity = 256;
 
+    using ThreadAffinity = u8;
+    using Tag = u8;
+
     enum class JobPriority { Low = 0, Medium, High };
     template <typename T>
     using JobBufferPtr = std::unique_ptr<RingBuffer<T, BufferCapacity>>;
     template <typename T>
     using TagBufferPtr = std::unique_ptr<RingBuffer<T, TagBufferCapacity>>;
 
-    constexpr ThreadAffinity InvalidThreadIndex = ThreadAffinity{std::numeric_limits<u8>::max()};
-    constexpr ThreadAffinity MaxThreads = ThreadAffinity{64};
-    constexpr Tag InvalidTag = Tag{std::numeric_limits<u8>::max()};
+    constexpr ThreadAffinity InvalidThreadIndex = std::numeric_limits<ThreadAffinity>::max();
+    constexpr ThreadAffinity MaxThreads = 64;
+    constexpr Tag InvalidTag = std::numeric_limits<Tag>::max();
 
     // Forward declarations
     struct Job;
@@ -179,6 +182,22 @@ namespace cw {
         return {std::tuple<JobCoroutine<Us>...>(std::move(coros)...), InvalidThreadIndex};
     }
 
+    struct WaitThreadTag {
+        ThreadAffinity m_Thread;
+    };
+
+    WaitThreadTag WaitThread(ThreadAffinity thread) {
+        return WaitThreadTag{thread};
+    }
+
+    struct WaitTagTag {
+        Tag m_Tag;
+    };
+
+    WaitTagTag WaitTag(Tag tag) {
+        return WaitTagTag{tag};
+    }
+
     /**
      * Base class for all coroutine promises. It's needed to distinguish between
      * void and any other return type.
@@ -210,8 +229,12 @@ namespace cw {
                 std::move(tag.coros));
         }
 
-        ThreadAwaiter<T> await_transform(ThreadAffinity thread) {
-            return ThreadAwaiter<T>(thread);
+        ThreadAwaiter<T> await_transform(WaitThreadTag&& tag) {
+            return ThreadAwaiter<T>(tag.m_Thread);
+        }
+
+        TagAwaiter<T> await_transform(WaitTagTag&& tag) {
+            return TagAwaiter<T>(tag.m_Tag);
         }
 
         virtual void Resume() override {

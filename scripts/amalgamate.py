@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Amalgamate the jobsys headers into a single distributable header.
+Amalgamate the CoroWeaver headers into a single distributable header.
 
 Walks from --entry (relative to --root), inlining any local
-#include "jobsys/..." headers recursively. #pragma once on inlined
+#include "coroweaver/..." headers recursively. #pragma once on inlined
 files is stripped (the output gets a single one). #include <...>
 (system/vendor) lines are collected, deduplicated, and emitted once
 at the top. // IWYU pragma: lines are scrubbed.

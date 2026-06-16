@@ -33,31 +33,6 @@ namespace cw {
     static_assert(sizeof(f32) == 4, "f32 is not 32 bits!");
     static_assert(sizeof(f64) == 8, "f64 is not 64 bits!");
 
-    template <typename T, typename tag>
-    struct StrongType {
-        constexpr explicit StrongType<T, tag>(T value)
-            : m_Value(value) {}
-
-        constexpr const T& Get() const noexcept {
-            return m_Value;
-        }
-
-        constexpr StrongType operator+(StrongType rhs) const {
-            return StrongType{m_Value + rhs.m_Value};
-        }
-
-        constexpr StrongType operator-(StrongType rhs) const {
-            return StrongType{m_Value - rhs.m_Value};
-        }
-
-        constexpr auto operator<=>(const StrongType&) const = default;
-
-        T m_Value;
-    };
-
-    using ThreadAffinity = StrongType<u8, struct ThreadTag>;
-    using Tag = StrongType<u8, struct TagTag>;
-
 
 // Macros for easier error handling
 #define CW_PANIC(...)     \

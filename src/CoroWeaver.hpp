@@ -299,7 +299,7 @@ namespace cw {
             }
 
             for (Job* job : toSchedule)
-                Schedule(job, nullptr);
+                Schedule(job, job->m_Parent);
         }
 
         /**

@@ -455,12 +455,13 @@ namespace cw {
     inline static constexpr u32 TagBufferCapacity = 256;
 
     using ThreadAffinity = u8;
+    using Tag = u8;
+
     enum class JobPriority { Low = 0, Medium, High };
     template <typename T>
     using JobBufferPtr = std::unique_ptr<RingBuffer<T, BufferCapacity>>;
     template <typename T>
     using TagBufferPtr = std::unique_ptr<RingBuffer<T, TagBufferCapacity>>;
-    using Tag = u8;
 
     constexpr ThreadAffinity InvalidThreadIndex = std::numeric_limits<ThreadAffinity>::max();
     constexpr ThreadAffinity MaxThreads = 64;
@@ -481,6 +482,8 @@ namespace cw {
     struct JobAwaiterMultiple;
     template <typename T>
     struct ThreadAwaiter;
+    template <typename T>
+    struct TagAwaiter;
 
     /**
      * This is the base Job sruct. Alls jobs derive from this.
@@ -502,6 +505,7 @@ namespace cw {
               m_ThreadIndex(threadIndex),
               m_IsFunction(isFunction),
               m_Tag(tag) {}
+
         virtual ~Job() = default;
 
         virtual void Resume() = 0;
@@ -617,6 +621,22 @@ namespace cw {
         return {std::tuple<JobCoroutine<Us>...>(std::move(coros)...), InvalidThreadIndex};
     }
 
+    struct WaitThreadTag {
+        ThreadAffinity m_Thread;
+    };
+
+    WaitThreadTag WaitThread(ThreadAffinity thread) {
+        return WaitThreadTag{thread};
+    }
+
+    struct WaitTagTag {
+        Tag m_Tag;
+    };
+
+    WaitTagTag WaitTag(Tag tag) {
+        return WaitTagTag{tag};
+    }
+
     /**
      * Base class for all coroutine promises. It's needed to distinguish between
      * void and any other return type.
@@ -648,8 +668,12 @@ namespace cw {
                 std::move(tag.coros));
         }
 
-        ThreadAwaiter<T> await_transform(ThreadAffinity thread) {
-            return ThreadAwaiter<T>(thread);
+        ThreadAwaiter<T> await_transform(WaitThreadTag&& tag) {
+            return ThreadAwaiter<T>(tag.m_Thread);
+        }
+
+        TagAwaiter<T> await_transform(WaitTagTag&& tag) {
+            return TagAwaiter<T>(tag.m_Tag);
         }
 
         virtual void Resume() override {
@@ -969,7 +993,7 @@ namespace cw {
             }
 
             for (Job* job : toSchedule)
-                Schedule(job, nullptr);
+                Schedule(job, job->m_Parent);
         }
 
         /**
@@ -1133,6 +1157,9 @@ namespace cw {
         template <typename T>
         friend struct ThreadAwaiter;
 
+        template <typename T>
+        friend struct TagAwaiter;
+
         /**
          * Internal schedule method called by all the public ones
          * It's assumed that all job parameters are already set inside the job struct
@@ -1155,6 +1182,7 @@ namespace cw {
                     std::shared_lock lock(m_TagBuffersMutex);
 
                     if (m_TagBuffers.contains(tag)) {
+                        // Invalidate tag so that next time it's scheduled excecutes
                         job->m_Tag = InvalidTag;
                         CW_ENSURE(m_TagBuffers.at(tag)->Push(job), "...");
                         return;
@@ -1170,6 +1198,7 @@ namespace cw {
                         m_TagBuffers[tag] = std::make_unique<RingBuffer<Job*, TagBufferCapacity>>();
                     }
 
+                    // Invalidate tag so that next time it's scheduled excecutes
                     job->m_Tag = InvalidTag;
                     CW_ENSURE(m_TagBuffers.at(tag)->Push(job), "...");
                     return;
@@ -1346,6 +1375,7 @@ namespace cw {
         std::unordered_map<Tag, TagBufferPtr<Job*>> m_TagBuffers;
         std::shared_mutex m_TagBuffersMutex;
 
+        // The owned threads of the system
         std::vector<std::thread> m_Threads;
 
         // Synchronization types
@@ -1403,6 +1433,32 @@ namespace cw {
         void await_suspend(std::coroutine_handle<JobPromise<T>> h) noexcept {
             Job* job = &h.promise();
             job->m_ThreadIndex = m_Thread;
+
+            JobSystem::GetInstance().Schedule(job, job->m_Parent);
+        }
+
+        void await_resume() noexcept {}
+    };
+
+    /**
+     * Allows a coroutine to decide on which tag to continue executing by being
+     * rescheduled again
+     * */
+    template <typename T>
+    struct TagAwaiter {
+        Tag m_Tag;
+
+        TagAwaiter<T>(Tag tag)
+            : m_Tag(tag) {}
+
+        // Alaways suspend
+        bool await_ready() noexcept {
+            return false;
+        }
+
+        void await_suspend(std::coroutine_handle<JobPromise<T>> h) noexcept {
+            Job* job = &h.promise();
+            job->m_Tag = m_Tag;
 
             JobSystem::GetInstance().Schedule(job, job->m_Parent);
         }
