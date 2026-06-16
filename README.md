@@ -76,8 +76,8 @@ Description of basic methods/types:
       This is what every job coroutine must return in order to be able to be scheduled
 - `JobSystem::Init(ThreadAffinity threadCount)`
       Static method that will construct the system's singleton with `threadCount` worker threads [^1]
-- `Schedule(JobCoroutine<T>& job, ThreadAffinity threadId, JobPriority priority)`
-      Schedules the given coroutine with the priority and affinity desired. By default there is no thread affinity,      and the priority is medium.
+- `Schedule(JobCoroutine<T>& job, ThreadAffinity threadId, JobPriority priority, Tag tag)`
+      Schedules the given coroutine with the priority, affinity, and tag (if any) desired. By default there is no thread affinity, no tag, and the priority is medium.
 - `Shutdown()`
       Static method that deallocates all memory and finishes all remaining jobs.
 
@@ -193,7 +193,7 @@ js.Schedule(job, 1);
 JobSystem::Shutdown();
 ```
 
-#### Schedule itself on a specified tag
+#### Schedule itself on a specific tag
 
 In the same way a coroutine can change to a specific thread, it can also suspend itself and schedule to a specific tag. Useful for synchronizing specific coroutine sections.
 
