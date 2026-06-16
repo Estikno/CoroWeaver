@@ -123,8 +123,8 @@ A coroutine can suspend itself and change threads if needed. This is useful if o
 ```C++
 cw::JobCoroutine<void> SimpleCoroutineChangeThread(ThreadAffinity thread) {
     // Operations on thread 1...
-    // We can wait untill the the wanted thread is excecuting the coroutine
-    co_await thread;
+    // We can wait until the the wanted thread is excecuting the coroutine
+    co_await WaitThred(thread);
     // Other operations but now on thread 0...
     co_return;
 }
@@ -160,11 +160,19 @@ JobCoroutine<void> Children2() {
     co_return;
 }
 
+JobCoroutine<int> Children3() {
+    co_return 99;
+}
+
 JobCoroutine<void> Children1() {
     // Operations on thread 1
     
     // Before continuing with the current coroutine we wait on Children2();
     co_await WhenAll(0, Children2());
+
+    // We can also retrieve values returned by other coroutines
+    auto [a] = WhenAll(Children3());
+    // a == 99
     
     // We can also wait on multiple children on paralel (No affinity was set in this case):
     // co_await WhenAll(Children2(), Children3());
@@ -183,6 +191,35 @@ js.Schedule(job, 1);
 
 // Shutdown the system
 JobSystem::Shutdown();
+```
+
+#### Schedule itself on a specified tag
+
+In the same way a coroutine can change to a specific thread, it can also suspend itself and schedule to a specific tag. Useful for synchronizing specific coroutine sections.
+
+```C++
+cw::JobCoroutine<void> SimpleCoroutineScheduleTag(Tag tag) {
+    // We can wait until the the specified tag is scheduled
+    co_await WaitTag(tag);
+    // Now the job is being excecuted with other jobs assigned to the same tag
+    co_return;
+}
+
+// Initialize the system
+cw::JobSystem::Init(2);
+
+cw::JobSystem& js = cw::JobSystem::GetInstance();
+cw::JobCoroutine<void> job = SimpleCoroutineScheduleTag(77);
+
+js.Schedule(job);
+
+// After some time, the scheduled job is waiting on the 77 tag
+
+// Schedule the tag, which will excecute all jobs assigned to tag 77
+js.ScheduleTag(77);
+
+// Shutdown the system
+cw::JobSystem::Shutdown();
 ```
 
 ## External Workers
