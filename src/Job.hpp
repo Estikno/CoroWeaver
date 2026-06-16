@@ -15,17 +15,15 @@ namespace cw {
     inline static constexpr u32 BufferCapacity = 64;
     inline static constexpr u32 TagBufferCapacity = 256;
 
-    using ThreadAffinity = u8;
     enum class JobPriority { Low = 0, Medium, High };
     template <typename T>
     using JobBufferPtr = std::unique_ptr<RingBuffer<T, BufferCapacity>>;
     template <typename T>
     using TagBufferPtr = std::unique_ptr<RingBuffer<T, TagBufferCapacity>>;
-    using Tag = u8;
 
-    constexpr ThreadAffinity InvalidThreadIndex = std::numeric_limits<ThreadAffinity>::max();
-    constexpr ThreadAffinity MaxThreads = 64;
-    constexpr Tag InvalidTag = std::numeric_limits<Tag>::max();
+    constexpr ThreadAffinity InvalidThreadIndex = ThreadAffinity{std::numeric_limits<u8>::max()};
+    constexpr ThreadAffinity MaxThreads = ThreadAffinity{64};
+    constexpr Tag InvalidTag = Tag{std::numeric_limits<u8>::max()};
 
     // Forward declarations
     struct Job;
@@ -42,6 +40,8 @@ namespace cw {
     struct JobAwaiterMultiple;
     template <typename T>
     struct ThreadAwaiter;
+    template <typename T>
+    struct TagAwaiter;
 
     /**
      * This is the base Job sruct. Alls jobs derive from this.
@@ -63,6 +63,7 @@ namespace cw {
               m_ThreadIndex(threadIndex),
               m_IsFunction(isFunction),
               m_Tag(tag) {}
+
         virtual ~Job() = default;
 
         virtual void Resume() = 0;

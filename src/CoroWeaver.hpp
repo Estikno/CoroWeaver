@@ -463,6 +463,9 @@ namespace cw {
         template <typename T>
         friend struct ThreadAwaiter;
 
+        template <typename T>
+        friend struct TagAwaiter;
+
         /**
          * Internal schedule method called by all the public ones
          * It's assumed that all job parameters are already set inside the job struct
@@ -485,6 +488,7 @@ namespace cw {
                     std::shared_lock lock(m_TagBuffersMutex);
 
                     if (m_TagBuffers.contains(tag)) {
+                        // Invalidate tag so that next time it's scheduled excecutes
                         job->m_Tag = InvalidTag;
                         CW_ENSURE(m_TagBuffers.at(tag)->Push(job), "...");
                         return;
@@ -500,6 +504,7 @@ namespace cw {
                         m_TagBuffers[tag] = std::make_unique<RingBuffer<Job*, TagBufferCapacity>>();
                     }
 
+                    // Invalidate tag so that next time it's scheduled excecutes
                     job->m_Tag = InvalidTag;
                     CW_ENSURE(m_TagBuffers.at(tag)->Push(job), "...");
                     return;
@@ -676,6 +681,7 @@ namespace cw {
         std::unordered_map<Tag, TagBufferPtr<Job*>> m_TagBuffers;
         std::shared_mutex m_TagBuffersMutex;
 
+        // The owned threads of the system
         std::vector<std::thread> m_Threads;
 
         // Synchronization types
@@ -733,6 +739,32 @@ namespace cw {
         void await_suspend(std::coroutine_handle<JobPromise<T>> h) noexcept {
             Job* job = &h.promise();
             job->m_ThreadIndex = m_Thread;
+
+            JobSystem::GetInstance().Schedule(job, job->m_Parent);
+        }
+
+        void await_resume() noexcept {}
+    };
+
+    /**
+     * Allows a coroutine to decide on which tag to continue executing by being
+     * rescheduled again
+     * */
+    template <typename T>
+    struct TagAwaiter {
+        Tag m_Tag;
+
+        TagAwaiter<T>(Tag tag)
+            : m_Tag(tag) {}
+
+        // Alaways suspend
+        bool await_ready() noexcept {
+            return false;
+        }
+
+        void await_suspend(std::coroutine_handle<JobPromise<T>> h) noexcept {
+            Job* job = &h.promise();
+            job->m_Tag = m_Tag;
 
             JobSystem::GetInstance().Schedule(job, job->m_Parent);
         }
