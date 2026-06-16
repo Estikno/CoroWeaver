@@ -55,7 +55,7 @@ JobCoroutine<void> SimpleCoroutineVoid(std::atomic<bool>* excecuted, std::atomic
 }
 
 JobCoroutine<void> SimpleCoroutineChangeThread(std::atomic<bool>* correct, ThreadAffinity thread) {
-    co_await thread;
+    co_await WaitThread(thread);
     correct->store(JobSystem::GetInstance().GetThreadIndex() == thread);
     co_return;
 }
@@ -246,17 +246,63 @@ TEST_CASE("JobSystem - coroutine that waits multiple jobs on multiple threads ex
 // Priority and ordering
 // ─────────────────────────────────────────────
 
-TEST_CASE("JobSystem - high priority job executes before low priority") {
+// TEST_CASE("JobSystem - high priority job executes before low priority") {
+//     InitJS();
+//     JobSystem& js = JobSystem::GetInstance();
+//
+//     // Fill threads with blocking jobs so we can queue up prioritized work
+//     std::atomic<bool> gate{false};
+//     std::atomic<int> executionOrder{0};
+//     std::atomic<int> lowOrder{-1};
+//     std::atomic<int> highOrder{-1};
+//
+//     // Block all threads first
+//     for (int i = 0; i < 2; ++i) {
+//         js.Schedule([&gate]() {
+//             while (!gate.load(std::memory_order_acquire))
+//                 std::this_thread::yield();
+//         });
+//     }
+//
+//     // Small sleep to let blocking jobs occupy threads
+//     std::this_thread::sleep_for(std::chrono::milliseconds(10));
+//
+//     // Queue low then high
+//     js.Schedule([&]() { lowOrder.store(executionOrder.fetch_add(1)); }, JobPriority::Low);
+//     js.Schedule([&]() { highOrder.store(executionOrder.fetch_add(1)); }, JobPriority::High);
+//
+//     // Release the gate
+//     gate.store(true, std::memory_order_release);
+//
+//     auto start = std::chrono::steady_clock::now();
+//     while (lowOrder.load() == -1 || highOrder.load() == -1) {
+//         std::this_thread::yield();
+//         REQUIRE(std::chrono::steady_clock::now() - start < std::chrono::seconds(5));
+//     }
+//
+//     CHECK(highOrder.load() < lowOrder.load());
+//
+//     ShutdownJS();
+// }
+
+TEST_CASE("JobSystem - high priority batch finishes before low priority batch") {
     InitJS();
     JobSystem& js = JobSystem::GetInstance();
 
-    // Fill threads with blocking jobs so we can queue up prioritized work
+    constexpr int N = 50;
+
     std::atomic<bool> gate{false};
     std::atomic<int> executionOrder{0};
-    std::atomic<int> lowOrder{-1};
-    std::atomic<int> highOrder{-1};
 
-    // Block all threads first
+    // -1 = not yet run
+    std::atomic<int> highOrders[N];
+    std::atomic<int> lowOrders[N];
+    for (int i = 0; i < N; ++i) {
+        highOrders[i].store(-1);
+        lowOrders[i].store(-1);
+    }
+
+    // Block all threads so we can fill the queues before anything runs
     for (int i = 0; i < 2; ++i) {
         js.Schedule([&gate]() {
             while (!gate.load(std::memory_order_acquire))
@@ -264,23 +310,44 @@ TEST_CASE("JobSystem - high priority job executes before low priority") {
         });
     }
 
-    // Small sleep to let blocking jobs occupy threads
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
 
-    // Queue low then high
-    js.Schedule([&]() { lowOrder.store(executionOrder.fetch_add(1)); }, JobPriority::Low);
-    js.Schedule([&]() { highOrder.store(executionOrder.fetch_add(1)); }, JobPriority::High);
+    // Queue all low-priority first, then all high-priority
+    // This makes the test maximally adversarial: if priority is ignored,
+    // low jobs would tend to run first since they were enqueued first
+    for (int i = 0; i < N; ++i)
+        js.Schedule([&, i]() { lowOrders[i].store(executionOrder.fetch_add(1)); }, JobPriority::Low);
+    for (int i = 0; i < N; ++i)
+        js.Schedule([&, i]() { highOrders[i].store(executionOrder.fetch_add(1)); }, JobPriority::High);
 
-    // Release the gate
     gate.store(true, std::memory_order_release);
 
     auto start = std::chrono::steady_clock::now();
-    while (lowOrder.load() == -1 || highOrder.load() == -1) {
+    while (true) {
         std::this_thread::yield();
         REQUIRE(std::chrono::steady_clock::now() - start < std::chrono::seconds(5));
+
+        bool allDone = true;
+        for (int i = 0; i < N; ++i) {
+            if (highOrders[i].load() == -1 || lowOrders[i].load() == -1) {
+                allDone = false;
+                break;
+            }
+        }
+        if (allDone)
+            break;
     }
 
-    CHECK(highOrder.load() < lowOrder.load());
+    // Find the last high-priority execution order and the first low-priority one
+    int lastHigh = -1;
+    for (int i = 0; i < N; ++i)
+        lastHigh = std::max(lastHigh, highOrders[i].load());
+
+    int firstLow = std::numeric_limits<int>::max();
+    for (int i = 0; i < N; ++i)
+        firstLow = std::min(firstLow, lowOrders[i].load());
+
+    CHECK(lastHigh < firstLow);
 
     ShutdownJS();
 }
@@ -687,4 +754,440 @@ TEST_CASE("JobSystem - shutdown waits for external worker to deregister (now wit
 
     realExternal.join();
     // externalWorker.join();
+}
+
+// ─────────────────────────────────────────────
+// Tag scheduling
+// ─────────────────────────────────────────────
+
+JobCoroutine<void> TaggedCoroutine(std::atomic<int>* counter) {
+    counter->fetch_add(1);
+    co_return;
+}
+
+TEST_CASE("JobSystem - tagged function job does not execute until tag is scheduled") {
+    InitJS();
+    JobSystem& js = JobSystem::GetInstance();
+
+    std::atomic<bool> executed{false};
+
+    js.Schedule([&]() { executed.store(true); }, JobPriority::Medium, InvalidThreadIndex, 42);
+
+    // Give workers time to (incorrectly) run it
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    CHECK_FALSE(executed.load());
+
+    js.ScheduleTag(42);
+
+    auto start = std::chrono::steady_clock::now();
+    while (!executed.load()) {
+        std::this_thread::yield();
+        REQUIRE(std::chrono::steady_clock::now() - start < std::chrono::seconds(5));
+    }
+
+    CHECK(executed.load());
+    ShutdownJS();
+}
+
+TEST_CASE("JobSystem - tagged coroutine does not execute until tag is scheduled") {
+    InitJS();
+    JobSystem& js = JobSystem::GetInstance();
+
+    std::atomic<int> counter{0};
+    JobCoroutine<void> job = TaggedCoroutine(&counter);
+
+    js.Schedule(job, InvalidThreadIndex, JobPriority::Medium, 42);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    CHECK_EQ(counter.load(), 0);
+
+    js.ScheduleTag(42);
+
+    auto start = std::chrono::steady_clock::now();
+    while (counter.load() == 0) {
+        std::this_thread::yield();
+        REQUIRE(std::chrono::steady_clock::now() - start < std::chrono::seconds(5));
+    }
+
+    CHECK_EQ(counter.load(), 1);
+    ShutdownJS();
+}
+
+TEST_CASE("JobSystem - multiple jobs under the same tag all fire together") {
+    InitJS();
+    JobSystem& js = JobSystem::GetInstance();
+
+    constexpr int N = 5;
+    std::atomic<int> counter{0};
+
+    for (int i = 0; i < N; ++i)
+        js.Schedule([&]() { counter.fetch_add(1); }, JobPriority::Medium, InvalidThreadIndex, 99);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    CHECK_EQ(counter.load(), 0);
+
+    js.ScheduleTag(99);
+
+    auto start = std::chrono::steady_clock::now();
+    while (counter.load() < N) {
+        std::this_thread::yield();
+        REQUIRE(std::chrono::steady_clock::now() - start < std::chrono::seconds(5));
+    }
+
+    CHECK_EQ(counter.load(), N);
+    ShutdownJS();
+}
+
+TEST_CASE("JobSystem - jobs under different tags are independent") {
+    InitJS();
+    JobSystem& js = JobSystem::GetInstance();
+
+    std::atomic<int> counterA{0};
+    std::atomic<int> counterB{0};
+
+    js.Schedule([&]() { counterA.fetch_add(1); }, JobPriority::Medium, InvalidThreadIndex, 1);
+    js.Schedule([&]() { counterB.fetch_add(1); }, JobPriority::Medium, InvalidThreadIndex, 2);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    CHECK_EQ(counterA.load(), 0);
+    CHECK_EQ(counterB.load(), 0);
+
+    js.ScheduleTag(1);
+
+    auto start = std::chrono::steady_clock::now();
+    while (counterA.load() == 0) {
+        std::this_thread::yield();
+        REQUIRE(std::chrono::steady_clock::now() - start < std::chrono::seconds(5));
+    }
+
+    CHECK_EQ(counterA.load(), 1);
+    // Tag 2 was never scheduled, B must still be 0
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    CHECK_EQ(counterB.load(), 0);
+
+    js.ScheduleTag(2);
+
+    start = std::chrono::steady_clock::now();
+    while (counterB.load() == 0) {
+        std::this_thread::yield();
+        REQUIRE(std::chrono::steady_clock::now() - start < std::chrono::seconds(5));
+    }
+
+    CHECK_EQ(counterB.load(), 1);
+    ShutdownJS();
+}
+
+TEST_CASE("JobSystem - scheduling InvalidTag is a no-op") {
+    InitJS();
+    JobSystem& js = JobSystem::GetInstance();
+
+    // Should not panic or do anything observable
+    CHECK_NOTHROW(js.ScheduleTag(InvalidTag));
+
+    ShutdownJS();
+}
+
+TEST_CASE("JobSystem - scheduling a tag that has no jobs is a no-op") {
+    InitJS();
+    JobSystem& js = JobSystem::GetInstance();
+
+    CHECK_NOTHROW(js.ScheduleTag(123));
+
+    ShutdownJS();
+}
+
+TEST_CASE("JobSystem - tag can be scheduled multiple times, second fire is a no-op") {
+    InitJS();
+    JobSystem& js = JobSystem::GetInstance();
+
+    std::atomic<int> counter{0};
+    js.Schedule([&]() { counter.fetch_add(1); }, JobPriority::Medium, InvalidThreadIndex, 7);
+
+    js.ScheduleTag(7);
+
+    auto start = std::chrono::steady_clock::now();
+    while (counter.load() == 0) {
+        std::this_thread::yield();
+        REQUIRE(std::chrono::steady_clock::now() - start < std::chrono::seconds(5));
+    }
+
+    CHECK_EQ(counter.load(), 1);
+
+    // Fire again — buffer was drained, nothing should execute
+    js.ScheduleTag(7);
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    CHECK_EQ(counter.load(), 1);
+
+    ShutdownJS();
+}
+
+TEST_CASE("JobSystem - tagged job respects thread affinity when fired") {
+    InitJS();
+    JobSystem& js = JobSystem::GetInstance();
+
+    std::atomic<ThreadAffinity> ranOn{InvalidThreadIndex};
+    std::atomic<bool> done{false};
+
+    js.Schedule(
+        [&]() {
+            ranOn.store(js.GetThreadIndex());
+            done.store(true);
+        },
+        JobPriority::Medium,
+        /*threadId=*/1,
+        /*tag=*/55);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    CHECK_FALSE(done.load());
+
+    js.ScheduleTag(55);
+
+    auto start = std::chrono::steady_clock::now();
+    while (!done.load()) {
+        std::this_thread::yield();
+        REQUIRE(std::chrono::steady_clock::now() - start < std::chrono::seconds(5));
+    }
+
+    CHECK_EQ(ranOn.load(), 1);
+    ShutdownJS();
+}
+
+TEST_CASE("JobSystem - many tagged jobs stress test") {
+    InitJS();
+    JobSystem& js = JobSystem::GetInstance();
+
+    constexpr int N = 200; // well within the 256 capacity
+    std::atomic<int> counter{0};
+
+    for (int i = 0; i < N; ++i)
+        js.Schedule([&]() { counter.fetch_add(1); }, JobPriority::Medium, InvalidThreadIndex, 88);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    CHECK_EQ(counter.load(), 0);
+
+    js.ScheduleTag(88);
+
+    auto start = std::chrono::steady_clock::now();
+    while (counter.load() < N) {
+        std::this_thread::yield();
+        REQUIRE(std::chrono::steady_clock::now() - start < std::chrono::seconds(10));
+    }
+
+    CHECK_EQ(counter.load(), N);
+    ShutdownJS();
+}
+
+// ─────────────────────────────────────────────
+// WaitTag / WaitThread awaiter tests
+// ─────────────────────────────────────────────
+
+JobCoroutine<void> CoroutineWaitsForTag(std::atomic<int>* phase) {
+    phase->store(1); // reached the co_await
+    co_await WaitTag(200);
+    phase->store(2); // resumed after tag fired
+    co_return;
+}
+
+TEST_CASE("JobSystem - coroutine suspended on WaitTag does not resume until tag is scheduled") {
+    InitJS();
+    JobSystem& js = JobSystem::GetInstance();
+
+    std::atomic<int> phase{0};
+    JobCoroutine<void> job = CoroutineWaitsForTag(&phase);
+    js.Schedule(job);
+
+    // Wait until coroutine reaches the co_await
+    auto start = std::chrono::steady_clock::now();
+    while (phase.load() < 1) {
+        std::this_thread::yield();
+        REQUIRE(std::chrono::steady_clock::now() - start < std::chrono::seconds(5));
+    }
+
+    // Parked on tag — must not advance
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    CHECK_EQ(phase.load(), 1);
+
+    js.ScheduleTag(200);
+
+    start = std::chrono::steady_clock::now();
+    while (phase.load() < 2) {
+        std::this_thread::yield();
+        REQUIRE(std::chrono::steady_clock::now() - start < std::chrono::seconds(5));
+    }
+
+    CHECK_EQ(phase.load(), 2);
+    ShutdownJS();
+}
+
+JobCoroutine<void> CoroutineWaitsForTagTwice(std::atomic<int>* phase) {
+    phase->store(1);
+    co_await WaitTag(11);
+    phase->store(2);
+    co_await WaitTag(12);
+    phase->store(3);
+    co_return;
+}
+
+TEST_CASE("JobSystem - coroutine can WaitTag multiple times in sequence") {
+    InitJS();
+    JobSystem& js = JobSystem::GetInstance();
+
+    std::atomic<int> phase{0};
+    JobCoroutine<void> job = CoroutineWaitsForTagTwice(&phase);
+    js.Schedule(job);
+
+    // Wait for first park
+    auto start = std::chrono::steady_clock::now();
+    while (phase.load() < 1) {
+        std::this_thread::yield();
+        REQUIRE(std::chrono::steady_clock::now() - start < std::chrono::seconds(5));
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    CHECK_EQ(phase.load(), 1);
+
+    js.ScheduleTag(11);
+
+    start = std::chrono::steady_clock::now();
+    while (phase.load() < 2) {
+        std::this_thread::yield();
+        REQUIRE(std::chrono::steady_clock::now() - start < std::chrono::seconds(5));
+    }
+
+    // Parked on second tag now
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    CHECK_EQ(phase.load(), 2);
+
+    js.ScheduleTag(12);
+
+    start = std::chrono::steady_clock::now();
+    while (phase.load() < 3) {
+        std::this_thread::yield();
+        REQUIRE(std::chrono::steady_clock::now() - start < std::chrono::seconds(5));
+    }
+
+    CHECK_EQ(phase.load(), 3);
+    ShutdownJS();
+}
+
+JobCoroutine<void> CoroutineWaitsForTagThenThread(std::atomic<int>* phase, ThreadAffinity target) {
+    phase->store(1);
+    co_await WaitTag(77);
+    phase->store(2);
+    co_await WaitThread(target);
+    phase->store(3);
+    co_return;
+}
+
+TEST_CASE("JobSystem - coroutine can WaitTag then WaitThread in sequence") {
+    InitJS();
+    JobSystem& js = JobSystem::GetInstance();
+
+    std::atomic<int> phase{0};
+    // Schedule on thread 1, tag will release it, then it migrates to thread 0
+    JobCoroutine<void> job = CoroutineWaitsForTagThenThread(&phase, 0);
+    js.Schedule(job, 1);
+
+    auto start = std::chrono::steady_clock::now();
+    while (phase.load() < 1) {
+        std::this_thread::yield();
+        REQUIRE(std::chrono::steady_clock::now() - start < std::chrono::seconds(5));
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    CHECK_EQ(phase.load(), 1);
+
+    js.ScheduleTag(77);
+
+    start = std::chrono::steady_clock::now();
+    while (phase.load() < 3) {
+        std::this_thread::yield();
+        REQUIRE(std::chrono::steady_clock::now() - start < std::chrono::seconds(5));
+    }
+
+    CHECK_EQ(phase.load(), 3);
+    ShutdownJS();
+}
+
+JobCoroutine<int> CoroutineWaitsForTagReturnsValue(std::atomic<int>* phase) {
+    phase->store(1);
+    co_await WaitTag(33);
+    phase->store(2);
+    co_return 99;
+}
+
+JobCoroutine<void> CoroutineAwaitsTagChild(std::atomic<int>* phase, std::atomic<int>* result) {
+    auto [val] = co_await WhenAll(CoroutineWaitsForTagReturnsValue(phase));
+    result->store(val);
+    co_return;
+}
+
+TEST_CASE("JobSystem - parent correctly receives value from child that used WaitTag") {
+    InitJS();
+    JobSystem& js = JobSystem::GetInstance();
+
+    std::atomic<int> phase{0};
+    std::atomic<int> result{0};
+    JobCoroutine<void> job = CoroutineAwaitsTagChild(&phase, &result);
+    js.Schedule(job);
+
+    // Wait for child to park on tag
+    auto start = std::chrono::steady_clock::now();
+    while (phase.load() < 1) {
+        std::this_thread::yield();
+        REQUIRE(std::chrono::steady_clock::now() - start < std::chrono::seconds(5));
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    // Parent must also still be suspended (child hasn't finished)
+    CHECK_EQ(result.load(), 0);
+
+    js.ScheduleTag(33);
+
+    start = std::chrono::steady_clock::now();
+    while (result.load() == 0) {
+        std::this_thread::yield();
+        REQUIRE(std::chrono::steady_clock::now() - start < std::chrono::seconds(5));
+    }
+
+    CHECK_EQ(phase.load(), 2);
+    CHECK_EQ(result.load(), 99);
+    ShutdownJS();
+}
+
+JobCoroutine<void> CoroutineWaitsForTagStress(std::atomic<int>* counter) {
+    co_await WaitTag(44);
+    counter->fetch_add(1);
+    co_return;
+}
+
+TEST_CASE("JobSystem - many coroutines parked on same tag all resume when tag fires") {
+    InitJS();
+    JobSystem& js = JobSystem::GetInstance();
+
+    constexpr int N = 20;
+    std::atomic<int> counter{0};
+
+    std::vector<JobCoroutine<void>> jobs;
+    jobs.reserve(N);
+    for (int i = 0; i < N; ++i)
+        jobs.push_back(CoroutineWaitsForTagStress(&counter));
+
+    for (auto& job : jobs)
+        js.Schedule(job);
+
+    // Give all coroutines time to reach and park on the tag
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    CHECK_EQ(counter.load(), 0);
+
+    js.ScheduleTag(44);
+
+    auto start = std::chrono::steady_clock::now();
+    while (counter.load() < N) {
+        std::this_thread::yield();
+        REQUIRE(std::chrono::steady_clock::now() - start < std::chrono::seconds(5));
+    }
+
+    CHECK_EQ(counter.load(), N);
+    ShutdownJS();
 }
