@@ -241,17 +241,9 @@
 // ─────────────────────────────────────────────
 
 
-
-
-
-
-
-
-
 // ─────────────────────────────────────────────
 // Types.hpp
 // ─────────────────────────────────────────────
-
 
 
 namespace cw {
@@ -304,8 +296,6 @@ namespace cw {
 // ─────────────────────────────────────────────
 // RingBuffer.hpp
 // ─────────────────────────────────────────────
-
-
 
 
 namespace cw {
@@ -444,8 +434,6 @@ namespace cw {
 // ─────────────────────────────────────────────
 // Job.hpp
 // ─────────────────────────────────────────────
-
-
 
 
 namespace cw {
@@ -612,12 +600,12 @@ namespace cw {
     };
 
     template <typename... Us>
-    WhenAllTag<Us...> WhenAll(ThreadAffinity affinity, JobCoroutine<Us>&&... coros) {
+    inline WhenAllTag<Us...> WhenAll(ThreadAffinity affinity, JobCoroutine<Us>&&... coros) {
         return {std::tuple<JobCoroutine<Us>...>(std::move(coros)...), affinity};
     }
 
     template <typename... Us>
-    WhenAllTag<Us...> WhenAll(JobCoroutine<Us>&&... coros) {
+    inline WhenAllTag<Us...> WhenAll(JobCoroutine<Us>&&... coros) {
         return {std::tuple<JobCoroutine<Us>...>(std::move(coros)...), InvalidThreadIndex};
     }
 
@@ -625,7 +613,7 @@ namespace cw {
         ThreadAffinity m_Thread;
     };
 
-    WaitThreadTag WaitThread(ThreadAffinity thread) {
+    inline WaitThreadTag WaitThread(ThreadAffinity thread) {
         return WaitThreadTag{thread};
     }
 
@@ -633,7 +621,7 @@ namespace cw {
         Tag m_Tag;
     };
 
-    WaitTagTag WaitTag(Tag tag) {
+    inline WaitTagTag WaitTag(Tag tag) {
         return WaitTagTag{tag};
     }
 
