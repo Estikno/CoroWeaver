@@ -41,7 +41,7 @@ I'm working on improving and optimizing the code, but for now this is how the si
 
 ## Basic use
 
-The entire job system implementation is contained in **one header**, [`CorowWeaver.hpp`][Coroweaver.hpp].
+The entire job system implementation is contained in **one header**, [`CoroWeaver.hpp`][Coroweaver.hpp].
 Download and include that to use the system, you will also have to include **moodycamel's concurrentqueue** as my implementation depends on it.
 
 Simple example:
