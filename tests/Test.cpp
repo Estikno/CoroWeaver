@@ -55,7 +55,7 @@ JobCoroutine<void> SimpleCoroutineVoid(std::atomic<bool>* excecuted, std::atomic
 }
 
 JobCoroutine<void> SimpleCoroutineChangeThread(std::atomic<bool>* correct, ThreadAffinity thread) {
-    co_await WaitThread(thread);
+    co_await MoveToThread(thread);
     correct->store(JobSystem::GetInstance().GetThreadIndex() == thread);
     co_return;
 }
@@ -978,17 +978,17 @@ TEST_CASE("JobSystem - many tagged jobs stress test") {
 }
 
 // ─────────────────────────────────────────────
-// WaitTag / WaitThread awaiter tests
+// MoveToTag / MoveToThread awaiter tests
 // ─────────────────────────────────────────────
 
 JobCoroutine<void> CoroutineWaitsForTag(std::atomic<int>* phase) {
     phase->store(1); // reached the co_await
-    co_await WaitTag(200);
+    co_await MoveToTag(200);
     phase->store(2); // resumed after tag fired
     co_return;
 }
 
-TEST_CASE("JobSystem - coroutine suspended on WaitTag does not resume until tag is scheduled") {
+TEST_CASE("JobSystem - coroutine suspended on MoveToTag does not resume until tag is scheduled") {
     InitJS();
     JobSystem& js = JobSystem::GetInstance();
 
@@ -1021,14 +1021,14 @@ TEST_CASE("JobSystem - coroutine suspended on WaitTag does not resume until tag 
 
 JobCoroutine<void> CoroutineWaitsForTagTwice(std::atomic<int>* phase) {
     phase->store(1);
-    co_await WaitTag(11);
+    co_await MoveToTag(11);
     phase->store(2);
-    co_await WaitTag(12);
+    co_await MoveToTag(12);
     phase->store(3);
     co_return;
 }
 
-TEST_CASE("JobSystem - coroutine can WaitTag multiple times in sequence") {
+TEST_CASE("JobSystem - coroutine can MoveToTag multiple times in sequence") {
     InitJS();
     JobSystem& js = JobSystem::GetInstance();
 
@@ -1072,14 +1072,14 @@ TEST_CASE("JobSystem - coroutine can WaitTag multiple times in sequence") {
 
 JobCoroutine<void> CoroutineWaitsForTagThenThread(std::atomic<int>* phase, ThreadAffinity target) {
     phase->store(1);
-    co_await WaitTag(77);
+    co_await MoveToTag(77);
     phase->store(2);
-    co_await WaitThread(target);
+    co_await MoveToThread(target);
     phase->store(3);
     co_return;
 }
 
-TEST_CASE("JobSystem - coroutine can WaitTag then WaitThread in sequence") {
+TEST_CASE("JobSystem - coroutine can MoveToTag then MoveToThread in sequence") {
     InitJS();
     JobSystem& js = JobSystem::GetInstance();
 
@@ -1111,7 +1111,7 @@ TEST_CASE("JobSystem - coroutine can WaitTag then WaitThread in sequence") {
 
 JobCoroutine<int> CoroutineWaitsForTagReturnsValue(std::atomic<int>* phase) {
     phase->store(1);
-    co_await WaitTag(33);
+    co_await MoveToTag(33);
     phase->store(2);
     co_return 99;
 }
@@ -1122,7 +1122,7 @@ JobCoroutine<void> CoroutineAwaitsTagChild(std::atomic<int>* phase, std::atomic<
     co_return;
 }
 
-TEST_CASE("JobSystem - parent correctly receives value from child that used WaitTag") {
+TEST_CASE("JobSystem - parent correctly receives value from child that used MoveToTag") {
     InitJS();
     JobSystem& js = JobSystem::GetInstance();
 
@@ -1156,7 +1156,7 @@ TEST_CASE("JobSystem - parent correctly receives value from child that used Wait
 }
 
 JobCoroutine<void> CoroutineWaitsForTagStress(std::atomic<int>* counter) {
-    co_await WaitTag(44);
+    co_await MoveToTag(44);
     counter->fetch_add(1);
     co_return;
 }
@@ -1189,5 +1189,223 @@ TEST_CASE("JobSystem - many coroutines parked on same tag all resume when tag fi
     }
 
     CHECK_EQ(counter.load(), N);
+    ShutdownJS();
+}
+
+// ─────────────────────────────────────────────
+// WaitOnTagAwaiter (multi-waiter tag completion)
+// ─────────────────────────────────────────────
+
+JobCoroutine<void> TaggedWorkerCoroutine(std::atomic<int>* counter, Tag tag) {
+    counter->fetch_add(1);
+    co_return;
+}
+
+JobCoroutine<void> WaitOnTagCoroutine(std::atomic<int>* phase, Tag tag) {
+    phase->store(1);
+    co_await WaitOnTag(tag);
+    phase->store(2);
+    co_return;
+}
+
+TEST_CASE("JobSystem - coroutine waiting on tag does not resume until all tag jobs finish") {
+    InitJS();
+    JobSystem& js = JobSystem::GetInstance();
+
+    std::atomic<int> workCounter{0};
+    std::atomic<int> phase{0};
+
+    // Register 3 jobs under tag 500, but don't release them yet
+    for (int i = 0; i < 3; ++i)
+        js.Schedule([&]() { workCounter.fetch_add(1); }, JobPriority::Medium, InvalidThreadIndex, 500);
+
+    JobCoroutine<void> waiter = WaitOnTagCoroutine(&phase, 500);
+    js.Schedule(waiter);
+
+    // Wait until waiter coroutine reaches the await
+    auto start = std::chrono::steady_clock::now();
+    while (phase.load() < 1) {
+        std::this_thread::yield();
+        REQUIRE(std::chrono::steady_clock::now() - start < std::chrono::seconds(5));
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    CHECK_EQ(phase.load(), 1); // still parked, tag jobs haven't run
+
+    js.ScheduleTag(500);
+
+    start = std::chrono::steady_clock::now();
+    while (phase.load() < 2) {
+        std::this_thread::yield();
+        REQUIRE(std::chrono::steady_clock::now() - start < std::chrono::seconds(5));
+    }
+
+    CHECK_EQ(workCounter.load(), 3);
+    CHECK_EQ(phase.load(), 2);
+    ShutdownJS();
+}
+
+TEST_CASE("JobSystem - multiple coroutines can all wait on the same tag") {
+    InitJS();
+    JobSystem& js = JobSystem::GetInstance();
+
+    constexpr int NumWaiters = 10;
+    std::atomic<int> workCounter{0};
+    std::atomic<int> wakeCounter{0};
+
+    for (int i = 0; i < 5; ++i)
+        js.Schedule([&]() { workCounter.fetch_add(1); }, JobPriority::Medium, InvalidThreadIndex, 501);
+
+    auto makeWaiter = [&]() -> JobCoroutine<void> {
+        co_await WaitOnTag(501);
+        wakeCounter.fetch_add(1);
+        co_return;
+    };
+
+    std::vector<JobCoroutine<void>> waiters;
+    waiters.reserve(NumWaiters);
+    for (int i = 0; i < NumWaiters; ++i)
+        waiters.push_back(makeWaiter());
+
+    for (auto& w : waiters)
+        js.Schedule(w);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    CHECK_EQ(wakeCounter.load(), 0);
+
+    js.ScheduleTag(501);
+
+    auto start = std::chrono::steady_clock::now();
+    while (wakeCounter.load() < NumWaiters) {
+        std::this_thread::yield();
+        REQUIRE(std::chrono::steady_clock::now() - start < std::chrono::seconds(5));
+    }
+
+    CHECK_EQ(workCounter.load(), 5);
+    CHECK_EQ(wakeCounter.load(), NumWaiters);
+    ShutdownJS();
+}
+
+TEST_CASE("JobSystem - WaitOnTagAwaiter resumes immediately if tag has no pending jobs") {
+    InitJS();
+    JobSystem& js = JobSystem::GetInstance();
+
+    std::atomic<bool> done{false};
+
+    JobCoroutine<void> waiter = [](std::atomic<bool>* d) -> JobCoroutine<void> {
+        // Tag 502 was never used — nothing pending
+        co_await WaitOnTag(502);
+        d->store(true);
+        co_return;
+    }(&done);
+
+    js.Schedule(waiter);
+
+    auto start = std::chrono::steady_clock::now();
+    while (!done.load()) {
+        std::this_thread::yield();
+        REQUIRE(std::chrono::steady_clock::now() - start < std::chrono::seconds(5));
+    }
+
+    CHECK(done.load());
+    ShutdownJS();
+}
+
+TEST_CASE("JobSystem - WaitOnTagAwaiter resumes immediately if tag jobs already finished") {
+    InitJS();
+    JobSystem& js = JobSystem::GetInstance();
+
+    std::atomic<int> workCounter{0};
+    js.Schedule([&]() { workCounter.fetch_add(1); }, JobPriority::Medium, InvalidThreadIndex, 503);
+    js.ScheduleTag(503);
+
+    auto start = std::chrono::steady_clock::now();
+    while (workCounter.load() == 0) {
+        std::this_thread::yield();
+        REQUIRE(std::chrono::steady_clock::now() - start < std::chrono::seconds(5));
+    }
+
+    // Tag's jobs are already done — a late waiter should resume immediately
+    std::atomic<bool> done{false};
+    JobCoroutine<void> waiter = [](std::atomic<bool>* d) -> JobCoroutine<void> {
+        co_await WaitOnTag(503);
+        d->store(true);
+        co_return;
+    }(&done);
+
+    js.Schedule(waiter);
+
+    start = std::chrono::steady_clock::now();
+    while (!done.load()) {
+        std::this_thread::yield();
+        REQUIRE(std::chrono::steady_clock::now() - start < std::chrono::seconds(5));
+    }
+
+    CHECK(done.load());
+    ShutdownJS();
+}
+
+TEST_CASE("JobSystem - WaitOnTagAwaiter works with mixed function and coroutine jobs under a tag") {
+    InitJS();
+    JobSystem& js = JobSystem::GetInstance();
+
+    std::atomic<int> functionRan{0};
+    std::atomic<int> coroRan{0};
+    std::atomic<bool> waiterDone{false};
+
+    js.Schedule([&]() { functionRan.fetch_add(1); }, JobPriority::Medium, InvalidThreadIndex, 504);
+
+    JobCoroutine<void> coroJob = [](std::atomic<int>* c) -> JobCoroutine<void> {
+        c->fetch_add(1);
+        co_return;
+    }(&coroRan);
+    js.Schedule(coroJob, InvalidThreadIndex, JobPriority::Medium, 504);
+
+    JobCoroutine<void> waiter = [](std::atomic<bool>* d) -> JobCoroutine<void> {
+        co_await WaitOnTag(504);
+        d->store(true);
+        co_return;
+    }(&waiterDone);
+    js.Schedule(waiter);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    CHECK_FALSE(waiterDone.load());
+
+    js.ScheduleTag(504);
+
+    auto start = std::chrono::steady_clock::now();
+    while (!waiterDone.load()) {
+        std::this_thread::yield();
+        REQUIRE(std::chrono::steady_clock::now() - start < std::chrono::seconds(5));
+    }
+
+    CHECK_EQ(functionRan.load(), 1);
+    CHECK_EQ(coroRan.load(), 1);
+    CHECK(waiterDone.load());
+    ShutdownJS();
+}
+
+TEST_CASE("JobSystem - top-level tagged coroutine finishing under a tag does not crash") {
+    // Regression test: a top-level (parentless) coroutine scheduled with a tag
+    // must not crash FinalAwaiter when it completes.
+    InitJS();
+    JobSystem& js = JobSystem::GetInstance();
+
+    std::atomic<int> counter{0};
+    JobCoroutine<void> job = [](std::atomic<int>* c) -> JobCoroutine<void> {
+        c->fetch_add(1);
+        co_return;
+    }(&counter);
+
+    js.Schedule(job, InvalidThreadIndex, JobPriority::Medium, 505);
+    js.ScheduleTag(505);
+
+    auto start = std::chrono::steady_clock::now();
+    while (counter.load() == 0) {
+        std::this_thread::yield();
+        REQUIRE(std::chrono::steady_clock::now() - start < std::chrono::seconds(5));
+    }
+
+    CHECK_EQ(counter.load(), 1);
     ShutdownJS();
 }

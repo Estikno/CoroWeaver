@@ -4,6 +4,7 @@
 #include <memory>
 #include <functional>
 #include <coroutine>
+#include <mutex>
 #include <utility>
 
 #include "Types.hpp"
@@ -16,7 +17,7 @@ namespace cw {
     inline static constexpr u32 TagBufferCapacity = 256;
 
     using ThreadAffinity = u8;
-    using Tag = u8;
+    using Tag = u16;
 
     enum class JobPriority { Low = 0, Medium, High };
     template <typename T>
@@ -42,9 +43,12 @@ namespace cw {
     template <typename T, typename... Us>
     struct JobAwaiterMultiple;
     template <typename T>
-    struct ThreadAwaiter;
+    struct MoveToThreadAwaiter;
     template <typename T>
-    struct TagAwaiter;
+    struct MoveToTagAwaiter;
+    template <typename T>
+    struct WaitOnTagAwaiter;
+    struct TagWaitState;
 
     /**
      * This is the base Job sruct. Alls jobs derive from this.
@@ -53,7 +57,9 @@ namespace cw {
         JobPriority m_Priority{JobPriority::Medium};
         ThreadAffinity m_ThreadIndex{InvalidThreadIndex};
         bool m_IsFunction{true};
+
         Tag m_Tag{InvalidTag};
+        TagWaitState* m_TagWaitState{nullptr};
 
         // Who is waiting for me (only on coroutines)
         Job* m_Parent{nullptr};
@@ -182,20 +188,28 @@ namespace cw {
         return {std::tuple<JobCoroutine<Us>...>(std::move(coros)...), InvalidThreadIndex};
     }
 
-    struct WaitThreadTag {
+    struct MoveToThreadTag {
         ThreadAffinity m_Thread;
     };
 
-    inline WaitThreadTag WaitThread(ThreadAffinity thread) {
-        return WaitThreadTag{thread};
+    inline MoveToThreadTag MoveToThread(ThreadAffinity thread) {
+        return MoveToThreadTag{thread};
     }
 
-    struct WaitTagTag {
+    struct MoveToTagTag {
         Tag m_Tag;
     };
 
-    inline WaitTagTag WaitTag(Tag tag) {
-        return WaitTagTag{tag};
+    inline MoveToTagTag MoveToTag(Tag tag) {
+        return MoveToTagTag{tag};
+    }
+
+    struct WaitOnTagTag {
+        Tag m_Tag;
+    };
+
+    inline WaitOnTagTag WaitOnTag(Tag tag) {
+        return WaitOnTagTag{tag};
     }
 
     /**
@@ -229,12 +243,16 @@ namespace cw {
                 std::move(tag.coros));
         }
 
-        ThreadAwaiter<T> await_transform(WaitThreadTag&& tag) {
-            return ThreadAwaiter<T>(tag.m_Thread);
+        MoveToThreadAwaiter<T> await_transform(MoveToThreadTag&& tag) {
+            return MoveToThreadAwaiter<T>(tag.m_Thread);
         }
 
-        TagAwaiter<T> await_transform(WaitTagTag&& tag) {
-            return TagAwaiter<T>(tag.m_Tag);
+        MoveToTagAwaiter<T> await_transform(MoveToTagTag&& tag) {
+            return MoveToTagAwaiter<T>(tag.m_Tag);
+        }
+
+        WaitOnTagAwaiter<T> await_transform(WaitOnTagTag&& tag) {
+            return WaitOnTagAwaiter<T>(tag.m_Tag);
         }
 
         virtual void Resume() override {
@@ -283,5 +301,12 @@ namespace cw {
         }
 
         void return_void() {}
+    };
+
+    struct TagWaitState {
+        // jobs still in-flight under this tag
+        std::atomic<u32> m_PendingJobs{0};
+        std::vector<Job*> m_Waiters;
+        std::mutex m_WaitersMutex;
     };
 } // namespace cw
