@@ -789,9 +789,8 @@ namespace cw {
         WaitOnTagAwaiter<T>(Tag tag)
             : m_Tag(tag) {}
 
-        // Only suspend if there are jobs on the tag
         bool await_ready() noexcept {
-            return false; // always go through await_suspend to avoid the race
+            return false; // always go through await_suspend to avoid a race condition
         }
 
         bool await_suspend(std::coroutine_handle<JobPromise<T>> h) noexcept {

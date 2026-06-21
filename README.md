@@ -33,9 +33,9 @@ Because I'm still learning about coroutines, the code is simple, so you can add 
 
 ## Reasons *not* to use
 
-As I stated before, I'm still learning and the system is not fully developed and tested and new feature will be added. So if **stability**, **fully tested** and **optimized** are things that are indispensable for your use case then I can't recommend my design at the moment.
+As I stated before, I'm still learning and the system is not fully developed and tested, and new feature will be added. So if **stability**, **fully tested** and **optimized** are things that are indispensable for your use case then I can't recommend my design at the moment.
 
-Internally it uses [moodycamel::ConcurrentQueue][concurrentqueue] as a dependency so you will need to also include it wherever you use CoroWeaver. Because of this dependecy it also has moodycamel's limitations which you can read on his github in more detail but that can be summarized as: **not linearizable** and **not NUMA aware**.
+Internally it uses [moodycamel::ConcurrentQueue][concurrentqueue] as a dependency so you will need to also include it wherever you use CoroWeaver. Because of this dependency it also has moodycamel's limitations which you can read on his GitHub in more detail, but that can be summarized as: **not linearizable** and **not NUMA aware**.
 
 I'm working on improving and optimizing the code, but for now this is how the situation is.
 
@@ -81,9 +81,9 @@ Description of basic methods/types:
 - `Shutdown()`
       Static method that deallocates all memory and finishes all remaining jobs.
 
-[^1]: It's not guaranted to spawn `threadCount` threads if there are not sufficient threads available. You can always query the number of working threads via the `ThreadAffinity GetNumThreads() const` method. Also, for now there can be a maximum of 64 worker threads.
+[^1]: It's not guaranteed to spawn `threadCount` threads if there are no sufficient threads available. You can always query the number of working threads via the `ThreadAffinity GetNumThreads() const` method. Also, for now there can be a maximum of 64 worker threads.
 
-Note that the methods `Init` and `Shutdown` are the only **non-thread-safe** methods.
+Note that the methods `Init` and `Shutdown` are the only **non-thread-safe** methods. However, you can safely call Init and Shutdown from different threads.
 
 Another thing worth noting is that there can be a maximum of 64 jobs on the local buffer of a specific thread at the same time. That is, the jobs with a specific thread affinity. Upon reaching that limit and trying to push more the system will panic. This practically never happens, and I'm already developing a way to increase the capacity when needed, but for now a temporal solution is to change the default size of the local buffers.
 
@@ -124,7 +124,7 @@ A coroutine can suspend itself and change threads if needed. This is useful if o
 cw::JobCoroutine<void> SimpleCoroutineChangeThread(ThreadAffinity thread) {
     // Operations on thread 1...
     // We can wait until the the wanted thread is excecuting the coroutine
-    co_await WaitThred(thread);
+    co_await MoveToThread(thread);
     // Other operations but now on thread 0...
     co_return;
 }
@@ -148,9 +148,9 @@ You can always check the available worker threads via the `GetNumThreads()` meth
 
 Coroutines are also able to wait on other coroutines to finish before continuing[^2]. This allows job dependencies to be automatically managed and no busy waiting to happen. This is because while the coroutine is suspended waiting for its dependencies to finish, the thread executing the coroutine is still productive, executing other jobs or sleeping if there is nothing else to do.
 
-[^2]: This is only the case between coroutines. There isn't a way of syncronizing functions and coroutines. So a coroutine waiting on a function is not allowed and vice versa. There's neither a way of synchronizing functions between them. Functions shall only be used in simple and independent jobs.
+[^2]: This is only the case between coroutines. So a coroutine can't wait on a scheduled function and vice versa. Note that inside coroutines you can still call functions without a problem, what is forbidden is to schedule and wait them while potentially being executed on another thread. If you need that functionality then use tags.
 
-If no thread affinity was not set when scheduling the coroutine, then it's not guaranteed that the thread executing the coroutine after waiting will be the same as before. This, however, allows for much better performance when thread affinity is not required.
+If no thread affinity was set when scheduling the coroutine, then it's not guaranteed that the thread executing the coroutine after waiting will be the same as before. This, however, allows for much better performance when thread affinity is not required.
 
 ```C++
 using namespace cw;
@@ -199,8 +199,8 @@ In the same way a coroutine can change to a specific thread, it can also suspend
 
 ```C++
 cw::JobCoroutine<void> SimpleCoroutineScheduleTag(Tag tag) {
-    // We can wait until the the specified tag is scheduled
-    co_await WaitTag(tag);
+    // We can wait until this coroutine is scheduled to the specified tag
+    co_await MoveToTag(tag);
     // Now the job is being excecuted with other jobs assigned to the same tag
     co_return;
 }
@@ -216,6 +216,50 @@ js.Schedule(job);
 // After some time, the scheduled job is waiting on the 77 tag
 
 // Schedule the tag, which will excecute all jobs assigned to tag 77
+js.ScheduleTag(77);
+
+// Shutdown the system
+cw::JobSystem::Shutdown();
+```
+
+### Wait all jobs of a tag
+
+Coroutines can wait suspend themselfs and wait all jobs finish of a given tag before continuing. This mechanism is very similar to waiting on other coroutines but there are a few differences.
+
+- The action of waiting on the completion of a tag does schedule it. So you will also have to manually schedule the tag you want to wait on. However, this gives much more flexibility as essentially there can be other coroutines also waiting on the tag at the same time. So if you have a couple of jobs that all depend on other group of jobs you can use tags to syncronize excecution.
+- This will wait on **all** jobs assigned to the tag, that includes both coroutines and functions. This means that you can effectively wait on a function possibly being executed on another thread. Something that you can't do with `WhenAll`.
+
+In addition, if the given tag doesn't contain any jobs the coroutine won't suspend and will simply continue.
+
+```C++
+cw::JobCoroutine<void> SimpleCoroutineWaitTag() {
+    // We can wait until the the specified tag is scheduled
+    co_await WaitOnTag(77);
+    // It's guaranteed that all jobs of tag 77 have finished, including functions
+    co_return;
+}
+
+cw::JobCoroutine<void> Test1(){
+    co_return;
+}
+
+void Test2(){
+    return;
+}
+
+// Initialize the system
+cw::JobSystem::Init(2);
+
+cw::JobSystem& js = cw::JobSystem::GetInstance();
+cw::JobCoroutine<void> job = SimpleCoroutineWaitTag();
+
+js.Schedule(job);
+
+// Schedule jobs of tag 77
+cw::JobCoroutine<void> j = SimpleCoroutineWaitTag(77);
+js.Schedule(j, cw::InvalidThreadIndex, cw::JobPriority::Medium, 77);
+js.Schedule(Test2, cw::InvalidThreadIndex, cw::JobPriority::Medium, 77);
+
 js.ScheduleTag(77);
 
 // Shutdown the system
