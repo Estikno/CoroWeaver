@@ -241,9 +241,17 @@
 // ─────────────────────────────────────────────
 
 
+
+
+
+
+
+
+
 // ─────────────────────────────────────────────
 // Types.hpp
 // ─────────────────────────────────────────────
+
 
 
 namespace cw {
@@ -296,6 +304,8 @@ namespace cw {
 // ─────────────────────────────────────────────
 // RingBuffer.hpp
 // ─────────────────────────────────────────────
+
+
 
 
 namespace cw {
@@ -436,6 +446,8 @@ namespace cw {
 // ─────────────────────────────────────────────
 
 
+
+
 namespace cw {
     // Useful defines
     // TODO: Make this static values defined by the user
@@ -443,7 +455,7 @@ namespace cw {
     inline static constexpr u32 TagBufferCapacity = 256;
 
     using ThreadAffinity = u8;
-    using Tag = u8;
+    using Tag = u16;
 
     enum class JobPriority { Low = 0, Medium, High };
     template <typename T>
@@ -472,6 +484,9 @@ namespace cw {
     struct MoveToThreadAwaiter;
     template <typename T>
     struct MoveToTagAwaiter;
+    template <typename T>
+    struct WaitOnTagAwaiter;
+    struct TagWaitState;
 
     /**
      * This is the base Job sruct. Alls jobs derive from this.
@@ -480,7 +495,9 @@ namespace cw {
         JobPriority m_Priority{JobPriority::Medium};
         ThreadAffinity m_ThreadIndex{InvalidThreadIndex};
         bool m_IsFunction{true};
+
         Tag m_Tag{InvalidTag};
+        TagWaitState* m_TagWaitState{nullptr};
 
         // Who is waiting for me (only on coroutines)
         Job* m_Parent{nullptr};
@@ -625,6 +642,14 @@ namespace cw {
         return MoveToTagTag{tag};
     }
 
+    struct WaitOnTagTag {
+        Tag m_Tag;
+    };
+
+    inline WaitOnTagTag WaitOnTag(Tag tag) {
+        return WaitOnTagTag{tag};
+    }
+
     /**
      * Base class for all coroutine promises. It's needed to distinguish between
      * void and any other return type.
@@ -662,6 +687,10 @@ namespace cw {
 
         MoveToTagAwaiter<T> await_transform(MoveToTagTag&& tag) {
             return MoveToTagAwaiter<T>(tag.m_Tag);
+        }
+
+        WaitOnTagAwaiter<T> await_transform(WaitOnTagTag&& tag) {
+            return WaitOnTagAwaiter<T>(tag.m_Tag);
         }
 
         virtual void Resume() override {
@@ -711,9 +740,22 @@ namespace cw {
 
         void return_void() {}
     };
+
+    struct TagWaitState {
+        // jobs still in-flight under this tag
+        std::atomic<u32> m_PendingJobs{0};
+        std::vector<Job*> m_Waiters;
+        std::mutex m_WaitersMutex;
+    };
 } // namespace cw
 
 namespace cw {
+    struct TagAux {
+        TagBufferPtr<Job*> m_Jobs;
+        std::unique_ptr<TagWaitState> m_Await;
+    };
+
+
     class JobSystem {
     public:
         JobSystem(const JobSystem& other) = delete;
@@ -976,7 +1018,7 @@ namespace cw {
                     return;
 
                 Job* job;
-                while (m_TagBuffers.at(tag)->Pop(job))
+                while (m_TagBuffers.at(tag).m_Jobs->Pop(job))
                     toSchedule.push_back(job);
             }
 
@@ -1148,6 +1190,45 @@ namespace cw {
         template <typename T>
         friend struct MoveToTagAwaiter;
 
+        template <typename T>
+        friend struct WaitOnTagAwaiter;
+
+        /**
+         * Returns how many jobs does the tag have. Assumes the tag is already created, if not it's undifined behavior.
+         *
+         * @param tag The tag to check
+         *
+         * @returns The numbers of jobs assigned to the given tag
+         *
+         * Thread safe
+         * */
+        u32 TagPendingCount(Tag tag) {
+            std::shared_lock lock(m_TagBuffersMutex);
+
+            if (!m_TagBuffers.contains(tag))
+                return 0;
+
+            return m_TagBuffers.at(tag).m_Await->m_PendingJobs.load(std::memory_order_acquire);
+        }
+
+        void NotifyTagWaiters(Job* job) {
+            if (job->m_TagWaitState != nullptr) {
+                u32 remaining = job->m_TagWaitState->m_PendingJobs.fetch_sub(1, std::memory_order_acq_rel);
+
+                if (remaining == 1) {
+                    // last job in the tag batch finished — wake all waiters
+                    std::vector<Job*> waiters;
+                    {
+                        std::scoped_lock lock(job->m_TagWaitState->m_WaitersMutex);
+                        waiters = std::move(job->m_TagWaitState->m_Waiters);
+                    }
+
+                    for (Job* waiter : waiters)
+                        JobSystem::GetInstance().Schedule(waiter, waiter->m_Parent);
+                }
+            }
+        }
+
         /**
          * Internal schedule method called by all the public ones
          * It's assumed that all job parameters are already set inside the job struct
@@ -1172,7 +1253,11 @@ namespace cw {
                     if (m_TagBuffers.contains(tag)) {
                         // Invalidate tag so that next time it's scheduled excecutes
                         job->m_Tag = InvalidTag;
-                        CW_ENSURE(m_TagBuffers.at(tag)->Push(job), "...");
+
+                        job->m_TagWaitState = m_TagBuffers.at(tag).m_Await.get();
+                        job->m_TagWaitState->m_PendingJobs.fetch_add(1, std::memory_order_release);
+
+                        CW_ENSURE(m_TagBuffers.at(tag).m_Jobs->Push(job), "...");
                         return;
                     }
                 }
@@ -1183,12 +1268,17 @@ namespace cw {
 
                     // We double check because some thread might have already crated the tag buffer
                     if (!m_TagBuffers.contains(tag)) {
-                        m_TagBuffers[tag] = std::make_unique<RingBuffer<Job*, TagBufferCapacity>>();
+                        m_TagBuffers[tag] = {std::make_unique<RingBuffer<Job*, TagBufferCapacity>>(),
+                                             std::make_unique<TagWaitState>()};
                     }
 
                     // Invalidate tag so that next time it's scheduled excecutes
                     job->m_Tag = InvalidTag;
-                    CW_ENSURE(m_TagBuffers.at(tag)->Push(job), "...");
+
+                    job->m_TagWaitState = m_TagBuffers.at(tag).m_Await.get();
+                    job->m_TagWaitState->m_PendingJobs.fetch_add(1, std::memory_order_release);
+
+                    CW_ENSURE(m_TagBuffers.at(tag).m_Jobs->Push(job), "...");
                     return;
                 }
             }
@@ -1302,6 +1392,9 @@ namespace cw {
 
             // Delete the function job since it can't possibly be rescheduled
             if (isFunction) {
+                // Wait tag logic (the coroutines one already happens in the final awaiter)
+                NotifyTagWaiters(job);
+
                 delete job;
             }
         }
@@ -1360,7 +1453,7 @@ namespace cw {
         std::array<moodycamel::ConcurrentQueue<Job*>, 3> m_JobBuffers;
         std::array<JobBufferPtr<Job*>, MaxThreads> m_JobLocalBuffers{};
 
-        std::unordered_map<Tag, TagBufferPtr<Job*>> m_TagBuffers;
+        std::unordered_map<Tag, TagAux> m_TagBuffers;
         std::shared_mutex m_TagBuffersMutex;
 
         // The owned threads of the system
@@ -1388,8 +1481,13 @@ namespace cw {
     template <typename T>
     struct FinalAwaiter : public std::suspend_always {
         bool await_suspend(std::coroutine_handle<JobPromise<T>> handle) noexcept {
-            Job* parent = handle.promise().m_Parent;
+            Job* self = &handle.promise();
+            Job* parent = self->m_Parent;
 
+            // Wait tag logic
+            JobSystem::GetInstance().NotifyTagWaiters(self);
+
+            // Parent dependency logic
             if (parent != nullptr) {
                 u32 remaining = parent->m_Children.fetch_sub(1, std::memory_order_acq_rel);
                 if (remaining == 1) {
@@ -1400,6 +1498,42 @@ namespace cw {
             }
             return false; // no parent, self-destruct
         }
+    };
+
+    template <typename T>
+    struct WaitOnTagAwaiter {
+        Tag m_Tag;
+
+        WaitOnTagAwaiter<T>(Tag tag)
+            : m_Tag(tag) {}
+
+        // Only suspend if there are jobs on the tag
+        bool await_ready() noexcept {
+            return false; // always go through await_suspend to avoid the race
+        }
+
+        bool await_suspend(std::coroutine_handle<JobPromise<T>> h) noexcept {
+            Job* job = &h.promise();
+
+            std::shared_lock sharedLock(JobSystem::GetInstance().m_TagBuffersMutex);
+
+            // The tag doesn't exist, we dont have to wait
+            if (!JobSystem::GetInstance().m_TagBuffers.contains(m_Tag))
+                return false;
+
+            TagWaitState* state = JobSystem::GetInstance().m_TagBuffers.at(m_Tag).m_Await.get();
+
+            std::scoped_lock lock(state->m_WaitersMutex);
+
+            if (state->m_PendingJobs.load(std::memory_order_acquire) == 0) {
+                return false; // already drained, resume immediately
+            }
+
+            state->m_Waiters.push_back(job);
+            return true; // genuinely suspend
+        }
+
+        void await_resume() noexcept {}
     };
 
     /**
