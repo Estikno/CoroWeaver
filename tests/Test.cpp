@@ -1,7 +1,7 @@
 #include <doctest.h>
 
-// #include "CoroWeaver.hpp"
-#include "coroweaver/CoroWeaver.hpp" // Single include version
+#include "CoroWeaver.hpp"
+// #include "coroweaver/CoroWeaver.hpp" // Single include version
 #include <atomic>
 #include <chrono>
 #include <stop_token>
@@ -55,7 +55,7 @@ JobCoroutine<void> SimpleCoroutineVoid(std::atomic<bool>* excecuted, std::atomic
 }
 
 JobCoroutine<void> SimpleCoroutineChangeThread(std::atomic<bool>* correct, ThreadAffinity thread) {
-    co_await WaitThread(thread);
+    co_await MoveToThread(thread);
     correct->store(JobSystem::GetInstance().GetThreadIndex() == thread);
     co_return;
 }
@@ -978,17 +978,17 @@ TEST_CASE("JobSystem - many tagged jobs stress test") {
 }
 
 // ─────────────────────────────────────────────
-// WaitTag / WaitThread awaiter tests
+// MoveToTag / MoveToThread awaiter tests
 // ─────────────────────────────────────────────
 
 JobCoroutine<void> CoroutineWaitsForTag(std::atomic<int>* phase) {
     phase->store(1); // reached the co_await
-    co_await WaitTag(200);
+    co_await MoveToTag(200);
     phase->store(2); // resumed after tag fired
     co_return;
 }
 
-TEST_CASE("JobSystem - coroutine suspended on WaitTag does not resume until tag is scheduled") {
+TEST_CASE("JobSystem - coroutine suspended on MoveToTag does not resume until tag is scheduled") {
     InitJS();
     JobSystem& js = JobSystem::GetInstance();
 
@@ -1021,14 +1021,14 @@ TEST_CASE("JobSystem - coroutine suspended on WaitTag does not resume until tag 
 
 JobCoroutine<void> CoroutineWaitsForTagTwice(std::atomic<int>* phase) {
     phase->store(1);
-    co_await WaitTag(11);
+    co_await MoveToTag(11);
     phase->store(2);
-    co_await WaitTag(12);
+    co_await MoveToTag(12);
     phase->store(3);
     co_return;
 }
 
-TEST_CASE("JobSystem - coroutine can WaitTag multiple times in sequence") {
+TEST_CASE("JobSystem - coroutine can MoveToTag multiple times in sequence") {
     InitJS();
     JobSystem& js = JobSystem::GetInstance();
 
@@ -1072,14 +1072,14 @@ TEST_CASE("JobSystem - coroutine can WaitTag multiple times in sequence") {
 
 JobCoroutine<void> CoroutineWaitsForTagThenThread(std::atomic<int>* phase, ThreadAffinity target) {
     phase->store(1);
-    co_await WaitTag(77);
+    co_await MoveToTag(77);
     phase->store(2);
-    co_await WaitThread(target);
+    co_await MoveToThread(target);
     phase->store(3);
     co_return;
 }
 
-TEST_CASE("JobSystem - coroutine can WaitTag then WaitThread in sequence") {
+TEST_CASE("JobSystem - coroutine can MoveToTag then MoveToThread in sequence") {
     InitJS();
     JobSystem& js = JobSystem::GetInstance();
 
@@ -1111,7 +1111,7 @@ TEST_CASE("JobSystem - coroutine can WaitTag then WaitThread in sequence") {
 
 JobCoroutine<int> CoroutineWaitsForTagReturnsValue(std::atomic<int>* phase) {
     phase->store(1);
-    co_await WaitTag(33);
+    co_await MoveToTag(33);
     phase->store(2);
     co_return 99;
 }
@@ -1122,7 +1122,7 @@ JobCoroutine<void> CoroutineAwaitsTagChild(std::atomic<int>* phase, std::atomic<
     co_return;
 }
 
-TEST_CASE("JobSystem - parent correctly receives value from child that used WaitTag") {
+TEST_CASE("JobSystem - parent correctly receives value from child that used MoveToTag") {
     InitJS();
     JobSystem& js = JobSystem::GetInstance();
 
@@ -1156,7 +1156,7 @@ TEST_CASE("JobSystem - parent correctly receives value from child that used Wait
 }
 
 JobCoroutine<void> CoroutineWaitsForTagStress(std::atomic<int>* counter) {
-    co_await WaitTag(44);
+    co_await MoveToTag(44);
     counter->fetch_add(1);
     co_return;
 }

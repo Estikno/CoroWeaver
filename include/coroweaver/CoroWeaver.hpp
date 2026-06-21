@@ -469,9 +469,9 @@ namespace cw {
     template <typename T, typename... Us>
     struct JobAwaiterMultiple;
     template <typename T>
-    struct ThreadAwaiter;
+    struct MoveToThreadAwaiter;
     template <typename T>
-    struct TagAwaiter;
+    struct MoveToTagAwaiter;
 
     /**
      * This is the base Job sruct. Alls jobs derive from this.
@@ -609,20 +609,20 @@ namespace cw {
         return {std::tuple<JobCoroutine<Us>...>(std::move(coros)...), InvalidThreadIndex};
     }
 
-    struct WaitThreadTag {
+    struct MoveToThreadTag {
         ThreadAffinity m_Thread;
     };
 
-    inline WaitThreadTag WaitThread(ThreadAffinity thread) {
-        return WaitThreadTag{thread};
+    inline MoveToThreadTag MoveToThread(ThreadAffinity thread) {
+        return MoveToThreadTag{thread};
     }
 
-    struct WaitTagTag {
+    struct MoveToTagTag {
         Tag m_Tag;
     };
 
-    inline WaitTagTag WaitTag(Tag tag) {
-        return WaitTagTag{tag};
+    inline MoveToTagTag MoveToTag(Tag tag) {
+        return MoveToTagTag{tag};
     }
 
     /**
@@ -656,12 +656,12 @@ namespace cw {
                 std::move(tag.coros));
         }
 
-        ThreadAwaiter<T> await_transform(WaitThreadTag&& tag) {
-            return ThreadAwaiter<T>(tag.m_Thread);
+        MoveToThreadAwaiter<T> await_transform(MoveToThreadTag&& tag) {
+            return MoveToThreadAwaiter<T>(tag.m_Thread);
         }
 
-        TagAwaiter<T> await_transform(WaitTagTag&& tag) {
-            return TagAwaiter<T>(tag.m_Tag);
+        MoveToTagAwaiter<T> await_transform(MoveToTagTag&& tag) {
+            return MoveToTagAwaiter<T>(tag.m_Tag);
         }
 
         virtual void Resume() override {
@@ -1143,10 +1143,10 @@ namespace cw {
         friend struct JobAwaiterMultiple;
 
         template <typename T>
-        friend struct ThreadAwaiter;
+        friend struct MoveToThreadAwaiter;
 
         template <typename T>
-        friend struct TagAwaiter;
+        friend struct MoveToTagAwaiter;
 
         /**
          * Internal schedule method called by all the public ones
@@ -1407,10 +1407,10 @@ namespace cw {
      * rescheduled again
      * */
     template <typename T>
-    struct ThreadAwaiter {
+    struct MoveToThreadAwaiter {
         ThreadAffinity m_Thread;
 
-        ThreadAwaiter<T>(ThreadAffinity thread)
+        MoveToThreadAwaiter<T>(ThreadAffinity thread)
             : m_Thread(thread) {}
 
         bool await_ready() noexcept {
@@ -1433,10 +1433,10 @@ namespace cw {
      * rescheduled again
      * */
     template <typename T>
-    struct TagAwaiter {
+    struct MoveToTagAwaiter {
         Tag m_Tag;
 
-        TagAwaiter<T>(Tag tag)
+        MoveToTagAwaiter<T>(Tag tag)
             : m_Tag(tag) {}
 
         // Alaways suspend
