@@ -17,7 +17,7 @@ namespace cw {
     inline static constexpr u32 TagBufferCapacity = 256;
 
     using ThreadAffinity = u8;
-    using Tag = u8;
+    using Tag = u16;
 
     enum class JobPriority { Low = 0, Medium, High };
     template <typename T>

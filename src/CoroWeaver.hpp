@@ -484,10 +484,12 @@ namespace cw {
          *
          * Thread safe
          * */
-        u32 TagPendingCount(Tag tag) const {
-            std::shared_lock sharedLock(m_TagBuffersMutex);
+        u32 TagPendingCount(Tag tag) {
+            std::shared_lock lock(m_TagBuffersMutex);
+
             if (!m_TagBuffers.contains(tag))
                 return 0;
+
             return m_TagBuffers.at(tag).m_Await->m_PendingJobs.load(std::memory_order_acquire);
         }
 
@@ -796,6 +798,11 @@ namespace cw {
             Job* job = &h.promise();
 
             std::shared_lock sharedLock(JobSystem::GetInstance().m_TagBuffersMutex);
+
+            // The tag doesn't exist, we dont have to wait
+            if (!JobSystem::GetInstance().m_TagBuffers.contains(m_Tag))
+                return false;
+
             TagWaitState* state = JobSystem::GetInstance().m_TagBuffers.at(m_Tag).m_Await.get();
 
             std::scoped_lock lock(state->m_WaitersMutex);
