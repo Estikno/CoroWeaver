@@ -66,6 +66,10 @@ namespace cw {
         // How many children I'm waiting for (only on coroutines)
         std::atomic<u32> m_Children{0};
 
+#ifdef TRACY_ENABLE
+        const char* m_DebugName{nullptr};
+#endif // TRACY_ENABEL
+
         Job() = default;
         Job(JobPriority priority, ThreadAffinity threadIndex, bool isFunction, Tag tag)
             : m_Priority(priority),
@@ -86,12 +90,24 @@ namespace cw {
         std::function<void()> m_Function;
 
         JobFunction() = default;
+#ifndef TRACY_ENABLE
         JobFunction(std::function<void()> func,
                     JobPriority priority = JobPriority::Medium,
                     ThreadAffinity threadIndex = InvalidThreadIndex,
                     Tag tag = InvalidTag)
             : m_Function(func),
               Job(priority, threadIndex, true, tag) {}
+#else
+        JobFunction(std::function<void()> func,
+                    JobPriority priority = JobPriority::Medium,
+                    ThreadAffinity threadIndex = InvalidThreadIndex,
+                    Tag tag = InvalidTag,
+                    const char* name = nullptr)
+            : m_Function(func),
+              Job(priority, threadIndex, true, tag) {
+            m_DebugName = name;
+        }
+#endif // !TRACY_ENABLE
 
         void Resume() override {
             m_Function();
