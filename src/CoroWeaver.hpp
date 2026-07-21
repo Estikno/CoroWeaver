@@ -240,8 +240,8 @@ namespace cw {
          * */
         template <typename T>
         static void Schedule(JobCoroutine<T>& job,
-                             ThreadAffinity threadId = InvalidThreadIndex,
                              JobPriority priority = JobPriority::Medium,
+                             ThreadAffinity threadId = InvalidThreadIndex,
                              Tag tag = InvalidTag) {
             s_Instance->ScheduleImpl(job, threadId, priority, tag);
         }
@@ -264,8 +264,8 @@ namespace cw {
          * */
         template <typename T>
         static void Schedule(JobCoroutine<T>& job,
-                             ThreadAffinity threadId = InvalidThreadIndex,
                              JobPriority priority = JobPriority::Medium,
+                             ThreadAffinity threadId = InvalidThreadIndex,
                              Tag tag = InvalidTag,
                              const char* name = nullptr) {
             s_Instance->ScheduleImpl(job, threadId, priority, tag, name);
@@ -1147,3 +1147,13 @@ namespace cw {
         }
     };
 } // namespace cw
+
+// Macros
+#ifdef TRACY_ENABLE
+#    define CW_SCHEDULE(job, priority, threadId, tag, name) \
+        ::cw::JobSystem::Schedule(job, priority, threadId, tag, name)
+#    define CW_CONVERT_TO_WORKER(name) ::cw::JobSystem::ConvertToWorkerThread(name)
+#else
+#    define CW_SCHEDULE(job, priority, threadId, tag, name) ::cw::JobSystem::Schedule(job, priority, threadId, tag)
+#    define CW_CONVERT_TO_WORKER(name) ::cw::JobSystem::ConvertToWorkerThread()
+#endif // TRACY_ENABLE
