@@ -335,7 +335,7 @@ JobSystem::Shutdown();
 
 ## Tracy Support
 
-Upon seeing the macros you might have wondered what purpose did the name parameter serve. Well, I have added a pretty basic support for the [Tracy][Tracy] profiler, this is only active if `TRACY_ENABLE` is defined, so there is no additional cost otherwise.
+Upon seeing the macros you might have wondered what purpose does the name parameter serve. Well, I have added a pretty basic support for the [Tracy][Tracy] profiler, this is only active if `TRACY_ENABLE` is defined, so there is no additional cost otherwise.
 
 Because of this, when Tracy is enabled the scheduling methods and the worker thread conversion will require an additional parameter (optional in the scheduling functions), this parameter is a debug name, more specifically a `const char*` that will be used by Tracy. For this reason it's recommended to use the macros when possible because when Tracy is disabled that name parameter of the macro gets deleted by the compiler, and so, no performance hit.
 
