@@ -1,6 +1,6 @@
 # CoroWeaver
 
-A simple, yet powerful job system based on coroutines.
+A simple, yet powerful job system based on coroutines. It's mainly being used in my own C++ game engine called [Axle][Axle]
 
 ## Features
 
@@ -11,15 +11,15 @@ A simple, yet powerful job system based on coroutines.
 - Assign tags to jobs for better synchronization
 - Custom thread affinity
 - Fully templated
-- Platform independent (no assembly; all is done through standard C++20 primitives).
+- Platform independent (no assembly; all is done through standard C++20 primitives)
+- Fully exception safe
+- Partial [Tracy][Tracy] support
 
 ## Features pending
 
 - Add your custom memory allocators
-- Expand local thread buffers in size as needed
 - Support fast bulk operations
 - Fully independent implementation (without external dependencies)
-- Fully exception safe.
 
 ## Reasons to use
 
@@ -37,7 +37,7 @@ As I stated before, I'm still learning and the system is not fully developed and
 
 Internally it uses [moodycamel::ConcurrentQueue][concurrentqueue] as a dependency so you will need to also include it wherever you use CoroWeaver. Because of this dependency it also has moodycamel's limitations which you can read on his GitHub in more detail, but that can be summarized as: **not linearizable** and **not NUMA aware**.
 
-I'm working on improving and optimizing the code, but for now this is how the situation is.
+I'm working on improving and optimizing the code. Also, because I created this job system for [Axle][Axle] (my custom C++ game engine), I'm adding features and improvements that are needed by the engine. That also means that at this moment CoroWeaver is not my number one priority project.
 
 ## Basic use
 
@@ -57,12 +57,11 @@ cw::JobCoroutine<void> SimpleCoroutine(std::atomic<bool>* executed) {
 
 // Initialize the system with 2 worker threads
 cw::JobSystem::Init(2);
-cw::JobSystem& js = cw::JobSystem::GetInstance();
 
 // Schedule a coroutine that will set executed to true
 std::atomic<bool> executed{false};
 cw::JobCoroutine<void> job = SimpleCoroutine(&executed);
-js.Schedule(job);
+cw::JobSystem::Schedule(job);
 
 // More operations...
 
@@ -76,8 +75,10 @@ Description of basic methods/types:
       This is what every job coroutine must return in order to be able to be scheduled
 - `JobSystem::Init(ThreadAffinity threadCount)`
       Static method that will construct the system's singleton with `threadCount` worker threads [^1]
-- `Schedule(JobCoroutine<T>& job, ThreadAffinity threadId, JobPriority priority, Tag tag)`
+- `Schedule(JobCoroutine<T>& job, JobPriority priority, ThreadAffinity threadId, Tag tag)`
       Schedules the given coroutine with the priority, affinity, and tag (if any) desired. By default there is no thread affinity, no tag, and the priority is medium.
+- `Schedule(std::function<void()> job, JobPriority priority, ThreadAffinity threadId, Tag tag)`
+  Same as with coroutines but for simple functions. For reasons stated below functions can't either return or accept anything as parameters. However, lambdas can be utilized to circumvent these limitations.
 - `Shutdown()`
       Static method that deallocates all memory and finishes all remaining jobs.
 
@@ -92,13 +93,13 @@ Full API (pseudocode):
     # Initialization and shutting down of the system
     static Init(threadCont) : void
     static Shutdown() : void
-
-    # Gets the instance of the system
-    GetInstance() : JobSystem&
     
     # Schedule jobs
-    Schedule(jobFunction, priority, threadId) : void
-    Schedule(jobCoroutine, priority, threadId) : void
+    Schedule(jobFunction, priority, threadId, tag) : void
+    Schedule(jobCoroutine, priority, threadId, tag) : void
+    
+    # Schedules a tag, i.e. all jobs assigned to that tag get scheduled for excecution
+    ScheduleTag(tag) : void
     
     # Gets the number of worker threads at the moment
     GetNumThreads() : ThreadAffinity
@@ -113,40 +114,50 @@ Full API (pseudocode):
     # Run external worker threads
     RunWorkerUntil(stop_token) : void
     RunWorkerFor(time) : void
+    
+    # Macros
+    CW_SCHEDULE(job, priority, threadId, tag, name) // Both for methods and coroutines
+    CW_CONVERT_TO_WORKER(name)
+    CW_DEREGISTER_WORKER
+
+Check the Tracy chapter if you have doubts about the name parameter in the macros.
 
 ## Coroutine features
 
 #### Change Threads
 
-A coroutine can suspend itself and change threads if needed. This is useful if only a specific section of a job is single-threaded or has other thread limitations.
+A coroutine can suspend itself and change threads if needed. This is useful if only a specific section of a job is single-threaded or has other thread limitations. Of course, if the thread you want to move the coroutine to is the same that is executing the coroutine then no suspension happens.
 
 ```C++
-cw::JobCoroutine<void> SimpleCoroutineChangeThread(ThreadAffinity thread) {
+using namespace cw;
+
+JobCoroutine<void> SimpleCoroutineChangeThread(ThreadAffinity thread) {
     // Operations on thread 1...
-    // We can wait until the the wanted thread is excecuting the coroutine
+    
+    // We can move to a specific thread
     co_await MoveToThread(thread);
+    
     // Other operations but now on thread 0...
     co_return;
 }
 
 // Initialize the system
-cw::JobSystem::Init(2);
+JobSystem::Init(2);
 
-cw::JobSystem& js = cw::JobSystem::GetInstance();
-cw::JobCoroutine<void> job = SimpleCoroutineChangeThread(0);
+JobCoroutine<void> job = SimpleCoroutineChangeThread(0);
 
 // We schedule the job on thread 1
-js.Schedule(job, 1);
+JobSystem::Schedule(job, 1);
 
 // Shutdown the system
-cw::JobSystem::Shutdown();
+JobSystem::Shutdown();
 ```
 
 You can always check the available worker threads via the `GetNumThreads()` method and the specific thread index of an external worker thread via `GetThreadIndex` method.
 
 #### Wait other coroutines to finish before proceeding
 
-Coroutines are also able to wait on other coroutines to finish before continuing[^2]. This allows job dependencies to be automatically managed and no busy waiting to happen. This is because while the coroutine is suspended waiting for its dependencies to finish, the thread executing the coroutine is still productive, executing other jobs or sleeping if there is nothing else to do.
+Coroutines are also able to wait on other coroutines to finish before continuing[^2]. This allows job dependencies to be automatically managed and no busy waiting to happen. This is because while the coroutine is suspended waiting for its dependencies to finish, the thread executing the coroutine is still productive, executing other jobs, or sleeping if there is nothing else to do.
 
 [^2]: This is only the case between coroutines. So a coroutine can't wait on a scheduled function and vice versa. Note that inside coroutines you can still call functions without a problem, what is forbidden is to schedule and wait them while potentially being executed on another thread. If you need that functionality then use tags.
 
@@ -167,7 +178,8 @@ JobCoroutine<int> Children3() {
 JobCoroutine<void> Children1() {
     // Operations on thread 1
     
-    // Before continuing with the current coroutine we wait on Children2();
+    // Before continuing with the current coroutine we wait on Children2(), which
+    // will be excecuted on thread 0
     co_await WhenAll(0, Children2());
 
     // We can also retrieve values returned by other coroutines
@@ -185,9 +197,8 @@ JobCoroutine<void> Children1() {
 // Initialize the system
 JobSystem::Init(2);
 
-JobSystem& js = JobSystem::GetInstance();
 JobCoroutine<void> job = Children1();
-js.Schedule(job, 1);
+JobSystem::Schedule(job, 1);
 
 // Shutdown the system
 JobSystem::Shutdown();
@@ -198,48 +209,54 @@ JobSystem::Shutdown();
 In the same way a coroutine can change to a specific thread, it can also suspend itself and schedule to a specific tag. Useful for synchronizing specific coroutine sections.
 
 ```C++
-cw::JobCoroutine<void> SimpleCoroutineScheduleTag(Tag tag) {
+using namespace cw;
+
+JobCoroutine<void> SimpleCoroutineScheduleTag(Tag tag) {
+    // Operations...
+  
     // We can wait until this coroutine is scheduled to the specified tag
     co_await MoveToTag(tag);
+    
     // Now the job is being excecuted with other jobs assigned to the same tag
     co_return;
 }
 
 // Initialize the system
-cw::JobSystem::Init(2);
+JobSystem::Init(2);
 
-cw::JobSystem& js = cw::JobSystem::GetInstance();
-cw::JobCoroutine<void> job = SimpleCoroutineScheduleTag(77);
+JobCoroutine<void> job = SimpleCoroutineScheduleTag(77);
 
-js.Schedule(job);
+JobSystem::Schedule(job);
 
 // After some time, the scheduled job is waiting on the 77 tag
 
 // Schedule the tag, which will excecute all jobs assigned to tag 77
-js.ScheduleTag(77);
+JobSystem::ScheduleTag(77);
 
 // Shutdown the system
-cw::JobSystem::Shutdown();
+JobSystem::Shutdown();
 ```
 
 ### Wait all jobs of a tag
 
-Coroutines can wait suspend themselfs and wait all jobs finish of a given tag before continuing. This mechanism is very similar to waiting on other coroutines but there are a few differences.
+Coroutines can suspend themselfs and wait all jobs finish of a given tag before continuing. This mechanism is very similar to waiting on other coroutines but there are a few differences.
 
-- The action of waiting on the completion of a tag does schedule it. So you will also have to manually schedule the tag you want to wait on. However, this gives much more flexibility as essentially there can be other coroutines also waiting on the tag at the same time. So if you have a couple of jobs that all depend on other group of jobs you can use tags to syncronize excecution.
-- This will wait on **all** jobs assigned to the tag, that includes both coroutines and functions. This means that you can effectively wait on a function possibly being executed on another thread. Something that you can't do with `WhenAll`.
+- The action of waiting on the completion of a tag **does not schedule it**. So you will also have to manually schedule the tag you want to wait on. However, this gives much more flexibility as there can be other coroutines waiting on the same tag at the same time. So if you have a couple of jobs that all depend on another group of jobs you can use tags to synchronize execution.
+- This will wait on **all jobs** assigned to the tag, that includes both coroutines and functions. This means that you can effectively wait on a function possibly being executed on another thread. Something that you can't do with `WhenAll`. However, unlike with coroutines, there is no way of retrieving the return values of a function from a coroutine, even with this method.
 
 In addition, if the given tag doesn't contain any jobs the coroutine won't suspend and will simply continue.
 
 ```C++
-cw::JobCoroutine<void> SimpleCoroutineWaitTag() {
+using namespace cw;
+
+JobCoroutine<void> SimpleCoroutineWaitTag() {
     // We can wait until the the specified tag is scheduled
     co_await WaitOnTag(77);
     // It's guaranteed that all jobs of tag 77 have finished, including functions
     co_return;
 }
 
-cw::JobCoroutine<void> Test1(){
+JobCoroutine<void> Test1(){
     co_return;
 }
 
@@ -248,57 +265,57 @@ void Test2(){
 }
 
 // Initialize the system
-cw::JobSystem::Init(2);
+JobSystem::Init(2);
 
-cw::JobSystem& js = cw::JobSystem::GetInstance();
-cw::JobCoroutine<void> job = SimpleCoroutineWaitTag();
+JobCoroutine<void> job = SimpleCoroutineWaitTag();
 
-js.Schedule(job);
+JobSystem::Schedule(job);
 
 // Schedule jobs of tag 77
-cw::JobCoroutine<void> j = SimpleCoroutineWaitTag(77);
-js.Schedule(j, cw::InvalidThreadIndex, cw::JobPriority::Medium, 77);
-js.Schedule(Test2, cw::InvalidThreadIndex, cw::JobPriority::Medium, 77);
+JobCoroutine<void> j = SimpleCoroutineWaitTag(77);
+JobSystem::Schedule(j, cw::InvalidThreadIndex, cw::JobPriority::Medium, 77);
+JobSystem::Schedule(Test2, cw::InvalidThreadIndex, cw::JobPriority::Medium, 77);
 
-js.ScheduleTag(77);
+JobSystem::ScheduleTag(77);
 
 // Shutdown the system
-cw::JobSystem::Shutdown();
+JobSystem::Shutdown();
 ```
 
 ## External Workers
 
-You can register/convert new worker threads once the system is initialized and use them as much as you want. However, it's necessary to follow the following steps.
+You can register/convert new worker threads once the system is initialized and use them as much as you want. However, it's necessary to follow the following steps in the following order.
 
-#### Registering
+#### 1. Registering
 
 It's as simple as calling the `ConvertToWorkerThread` method on an unregistered thread. This will prepare the thread so that it's able to execute jobs. This method returns the thread ID of the new worker.
 
 ```C++
+using namespace cw;
+
 // Initialize the system
-cw::JobSystem::Init(2);
-cw::JobSystem& js = cw::JobSystem::GetInstance();
+JobSystem::Init(2);
 
 // Convert the current thread into a worker
-cw::ThreadAffinity id = js.ConvertToWorkerThread();
+ThreadAffinity id = js.ConvertToWorkerThread();
 
 // Now there are 3 worker threads in total, this one and 2 more that are managed by the system
 ```
 
-#### Working
+#### 2. Working
 
-There are 2 ways of executing jobs: `RunWorkerUntil` and `RunWorkerFor`. The first one will execute jobs until the stop_source requests a stop; the second option will keep running for a specified amount of time.
+There are 2 ways of executing jobs: `RunWorkerUntil` and `RunWorkerFor`. The first one will execute jobs until the stop_source requests a stop; the second option will keep running for a specified amount of time. It's not guaranteed that when using `RunWorkerFor` the thread will work exactly the specified amount of time.
 
 ```C++
 // Execute jobs for 50 milliseconds
-js.RunWorkerFor(std::chrono::milliseconds(50));
+JobSystem::RunWorkerFor(std::chrono::milliseconds(50));
 
 // Excecute until source requets a stop
 std::stop_source source;
-js.RunWorkerUntil(source.get_token());
+JobSystem::RunWorkerUntil(source.get_token());
 ```
 
-#### Deregistering
+#### 3. Deregistering
 
 When shutting down the system, this will wait until all external workers have been deregistered via the `DeregisterWorkerThread` method, so if you forget to deregister even one, the system will sleep forever.
 
@@ -306,19 +323,27 @@ This step is only necessary on threads manually registered via `ConvertToWorkerT
 
 ```C++
 // Once we are done we deregister the worker
-js.DeregisterWorkerThread();
+JobSystem::DeregisterWorkerThread();
 
 // Now we can safely shut down the system
-cw::JobSystem::Shutdown();
+JobSystem::Shutdown();
 ```
 
 ## Samples (work in progress)
 
 ## Benchmarks (work in progress)
 
+## Tracy Support
+
+Upon seeing the macros you might have wondered what purpose did the name parameter serve. Well, I have added a pretty basic support for the [Tracy][Tracy] profiler, this is only active if `TRACY_ENABLE` is defined, so there is no additional cost otherwise.
+
+Because of this, when Tracy is enabled the scheduling methods and the worker thread conversion will require an additional parameter (optional in the scheduling functions), this parameter is a debug name, more specifically a `const char*` that will be used by Tracy. For this reason it's recommended to use the macros when possible because when Tracy is disabled that name parameter of the macro gets deleted by the compiler, and so, no performance hit.
+
+For now coroutines are treated as Fibers if a valid name is set (must be unique). This is due to Tracy's lack of support for coroutines. Function names are currently not used but are left there for macro support and possible future use.
+
 ## Tests
 
-I haven't written an extended amount of tests, so there might be unknown bugs that are really easy to trigger. With time I'll write a decent amount so that every edge case will be documented.
+I haven't written an extended amount of tests, so there might be unknown bugs that are relatively easy to trigger. With time I'll write a decent amount so that every edge case will be documented.
 
 ## License
 
@@ -328,8 +353,10 @@ As I stated above my implementation depents on moodycamel concurrent queue, whic
 
 This project also uses Doctest for testing, which is under the MIT license.
 
+[Axle]: https://github.com/Estikno/axle
 [concurrentqueue]:https://github.com/cameron314/concurrentqueue
 [NDTalk]:https://www.gdcvault.com/play/1022186/Parallelizing-the-Naughty-Dog-Engine
 [Coroweaver.hpp]: https://github.com/Estikno/CoroWeaver/blob/main/include/coroweaver/CoroWeaver.hpp
 [license]: https://github.com/Estikno/CoroWeaver/blob/main/LICENSE
 [moodylicense]:https://github.com/cameron314/concurrentqueue/blob/master/LICENSE.md
+[Tracy]: https://github.com/wolfpld/tracy

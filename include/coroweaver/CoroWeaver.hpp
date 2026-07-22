@@ -1891,3 +1891,5 @@ namespace cw {
 #    define CW_SCHEDULE(job, priority, threadId, tag, name) ::cw::JobSystem::Schedule(job, priority, threadId, tag)
 #    define CW_CONVERT_TO_WORKER(name) ::cw::JobSystem::ConvertToWorkerThread()
 #endif // TRACY_ENABLE
+
+#define CW_DEREGISTER_WORKER ::cw::JobSystem::DeregisterWorkerThread()
