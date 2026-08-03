@@ -36,6 +36,8 @@
 #endif // TRACY_ENABLE
 
 namespace cw {
+    using TimerEntry = std::pair<std::chrono::steady_clock::time_point, Job*>;
+
     struct TagAux {
         TagBufferPtr<Job*> m_Jobs;
         std::unique_ptr<TagWaitState> m_Await;
@@ -72,8 +74,8 @@ namespace cw {
             ThreadAffinity totalThreads = std::thread::hardware_concurrency();
             // FIX: This error message is temporal, in such cases simply prevent the
             // initialization or something
-            CW_ENSURE(totalThreads > 0, "There are not sufficient threads to initialize the job system");
-            CW_ENSURE(threadCount <= MaxThreads, "Can't spawn more than {0} worker threads", MaxThreads);
+            CW_ENSURE(totalThreads >= threadCount + 1, "There are not sufficient threads to initialize the job system");
+            CW_ENSURE(threadCount <= MaxThreads, "Can't spawn more than {0} worker threads.", MaxThreads);
 
             s_Instance = std::make_unique<JobSystem>();
             JobSystem& js = *s_Instance;
@@ -93,6 +95,9 @@ namespace cw {
                 js.m_CVs[i] = std::make_unique<std::condition_variable>();
             }
 
+            js.m_TimerCVMutex = std::make_unique<std::mutex>();
+            js.m_TimerCV = std::make_unique<std::condition_variable>();
+
             // Spawn worker threads
             for (ThreadAffinity i = 0; i < js.m_NumThreads.load(); ++i) {
                 js.m_Threads.emplace_back([i, &js]() {
@@ -100,6 +105,8 @@ namespace cw {
                     js.WorkerLoop();
                 });
             }
+
+            js.m_TimerThread = std::thread([&js]() { js.TimerLoop(); });
         }
 
         /**
@@ -132,6 +139,7 @@ namespace cw {
                 s_Instance->m_NumThreads.wait(active, std::memory_order_acquire);
                 active = s_Instance->m_NumThreads.load(std::memory_order_acquire);
             }
+            s_Instance->m_TimerThread.join();
 
             s_Instance.reset();
         }
@@ -653,6 +661,15 @@ namespace cw {
             m_IdleThreads.fetch_and(~(1ULL << m_Index), std::memory_order_release);
         }
 
+        void ScheduleAfter(std::chrono::milliseconds delay, Job* job) {
+            auto deadline = std::chrono::steady_clock::now() + delay;
+            {
+                std::scoped_lock lock(m_TimerCVMutex);
+                m_TimerQueue.push(std::make_pair(deadline, job));
+                m_TimerCV->notify_all();
+            }
+        }
+
         /**
          * Simply gets the singleton instance. Call after initialization.
          *
@@ -847,6 +864,36 @@ namespace cw {
             m_NumThreads.fetch_sub(1, std::memory_order_release);
         }
 
+        void TimerLoop() {
+            // We lock here because:
+            // https://stackoverflow.com/questions/38147825/shared-atomic-variable-is-not-properly-published-if-it-is-not-modified-under-mut
+            std::unique_lock lock(*m_TimerCVMutex);
+
+            while (m_Running.load(std::memory_order_acquire) || !m_TimerQueue.empty()) {
+                // Update idle bit mask
+                m_TimerCV->wait(lock, [this] {
+                    return !m_Running.load(std::memory_order_acquire) // Wake up to shutdown job system
+                                                                      // Check timer queue
+                           || !m_TimerQueue.empty();
+                });
+
+                if (!m_Running.load(std::memory_order_acquire) && m_TimerQueue.empty())
+                    break;
+
+                // Run job
+                auto [deadline, job] = m_TimerQueue.top();
+
+                // We sleeped without any interruption (no new sleep job added)
+                if (m_TimerCV->wait_until(lock, deadline) == std::cv_status::timeout) {
+                    m_TimerQueue.pop();
+
+                    // Schedule the job
+                    Schedule(job, job->m_Parent);
+                }
+                // Sleep job added while sleeping (we have to recheck everything again)
+            }
+        }
+
         /**
          * Attemps to execute a job if possible.
          * */
@@ -954,16 +1001,20 @@ namespace cw {
         // Buffers
         std::array<moodycamel::ConcurrentQueue<Job*>, 3> m_JobBuffers;
         std::array<JobBufferPtr<Job*>, MaxThreads> m_JobLocalBuffers{};
+        std::priority_queue<TimerEntry, std::vector<TimerEntry>, std::greater<TimerEntry>> m_TimerQueue;
 
         std::unordered_map<Tag, TagAux> m_TagBuffers;
         std::shared_mutex m_TagBuffersMutex;
 
         // The owned threads of the system
         std::vector<std::thread> m_Threads;
+        std::thread m_TimerThread;
 
         // Synchronization types
         std::array<std::unique_ptr<std::condition_variable>, MaxThreads> m_CVs;
         std::array<std::unique_ptr<std::mutex>, MaxThreads> m_CVsMutex;
+        std::unique_ptr<std::condition_variable> m_TimerCV;
+        std::unique_ptr<std::mutex> m_TimerCVMutex;
 
         /// Indicates which index does the current thread have
         inline static thread_local ThreadAffinity m_Index = InvalidThreadIndex;
