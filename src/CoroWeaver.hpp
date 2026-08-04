@@ -126,6 +126,12 @@ namespace cw {
                 s_Instance->m_CVs[i]->notify_all();
             }
 
+            // Wake the timer thread too, or it can sleep forever if the queue is empty
+            {
+                std::scoped_lock lock(*(s_Instance->m_TimerCVMutex));
+                s_Instance->m_TimerCV->notify_all();
+            }
+
             // Just join the threads the job system owns (it may not be as many as the
             // m_NumThreads variable's value)
             for (std::thread& thread : s_Instance->m_Threads) {
@@ -379,6 +385,9 @@ namespace cw {
 
         template <typename T>
         friend struct WaitOnTagAwaiter;
+
+        template <typename T>
+        friend struct WaitForAwaiter;
 
         // Static methods implementations
 
@@ -664,7 +673,7 @@ namespace cw {
         void ScheduleAfter(std::chrono::milliseconds delay, Job* job) {
             auto deadline = std::chrono::steady_clock::now() + delay;
             {
-                std::scoped_lock lock(m_TimerCVMutex);
+                std::scoped_lock lock(*m_TimerCVMutex);
                 m_TimerQueue.push(std::make_pair(deadline, job));
                 m_TimerCV->notify_all();
             }
@@ -1135,6 +1144,26 @@ namespace cw {
             job->m_Tag = m_Tag;
 
             JobSystem::GetInstance().Schedule(job, job->m_Parent);
+        }
+
+        void await_resume() noexcept {}
+    };
+
+    template <typename T>
+    struct WaitForAwaiter {
+        std::chrono::milliseconds m_Time;
+
+        WaitForAwaiter<T>(std::chrono::milliseconds time)
+            : m_Time(time) {}
+
+        // Suspend only if time != 0
+        bool await_ready() noexcept {
+            return m_Time == std::chrono::milliseconds(0);
+        }
+
+        void await_suspend(std::coroutine_handle<JobPromise<T>> h) noexcept {
+            Job* job = &h.promise();
+            JobSystem::GetInstance().ScheduleAfter(m_Time, job);
         }
 
         void await_resume() noexcept {}

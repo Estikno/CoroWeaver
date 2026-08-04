@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <limits>
 #include <memory>
 #include <functional>
@@ -49,6 +50,8 @@ namespace cw {
     template <typename T>
     struct WaitOnTagAwaiter;
     struct TagWaitState;
+    template <typename T>
+    struct WaitForAwaiter;
 
     /**
      * This is the base Job sruct. Alls jobs derive from this.
@@ -228,6 +231,14 @@ namespace cw {
         return WaitOnTagTag{tag};
     }
 
+    struct WaitForTag {
+        std::chrono::milliseconds m_Time;
+    };
+
+    inline WaitForTag WaitFor(std::chrono::milliseconds time) {
+        return WaitForTag{time};
+    }
+
     /**
      * Base class for all coroutine promises. It's needed to distinguish between
      * void and any other return type.
@@ -269,6 +280,10 @@ namespace cw {
 
         WaitOnTagAwaiter<T> await_transform(WaitOnTagTag&& tag) {
             return WaitOnTagAwaiter<T>(tag.m_Tag);
+        }
+
+        WaitForAwaiter<T> await_transform(WaitForTag&& tag) {
+            return WaitForAwaiter<T>(tag.m_Time);
         }
 
         virtual void Resume() override {
