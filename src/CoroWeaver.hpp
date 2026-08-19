@@ -126,12 +126,6 @@ namespace cw {
                 s_Instance->m_CVs[i]->notify_all();
             }
 
-            // Wake the timer thread too, or it can sleep forever if the queue is empty
-            {
-                std::scoped_lock lock(*(s_Instance->m_TimerCVMutex));
-                s_Instance->m_TimerCV->notify_all();
-            }
-
             // Just join the threads the job system owns (it may not be as many as the
             // m_NumThreads variable's value)
             for (std::thread& thread : s_Instance->m_Threads) {
@@ -145,6 +139,13 @@ namespace cw {
                 s_Instance->m_NumThreads.wait(active, std::memory_order_acquire);
                 active = s_Instance->m_NumThreads.load(std::memory_order_acquire);
             }
+
+            // Wake the timer thread too, or it can sleep forever if the queue is empty
+            {
+                std::scoped_lock lock(*(s_Instance->m_TimerCVMutex));
+                s_Instance->m_TimerCV->notify_all();
+            }
+
             s_Instance->m_TimerThread.join();
 
             s_Instance.reset();
