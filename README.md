@@ -117,12 +117,42 @@ Full API (pseudocode):
     
     # Macros
     CW_SCHEDULE(job, priority, threadId, tag, name) // Both for methods and coroutines
+    CW_SCHEDULE_TAG_AND_WAIT(tag) // Schedules a tag and makes the current coro wait
     CW_CONVERT_TO_WORKER(name)
     CW_DEREGISTER_WORKER
 
 Check the Tracy chapter if you have doubts about the name parameter in the macros.
 
 ## Coroutine features
+
+#### Wait for a specified amount of time
+
+A coroutine can suspend itself and wait for a specified amount of time (in milliseconds). IMPORTANT: Exact time precision is not guaranteed.
+
+```C++
+using namespace cw;
+
+JobCoroutine<void> SimpleCoroutineWait() {
+    // Operations...
+    
+    // Wait 123 milliseconds
+    co_await MoveFor(std::chrono::milliseconds(123));
+    
+    // Other operations after 123 milliseconds...
+    co_return;
+}
+
+// Initialize the system
+JobSystem::Init(2);
+
+JobCoroutine<void> job = SimpleCoroutineWait();
+
+// We schedule the job on whatever thread is available
+JobSystem::Schedule(job);
+
+// Shutdown the system
+JobSystem::Shutdown();
+```
 
 #### Change Threads
 
@@ -237,7 +267,7 @@ JobSystem::ScheduleTag(77);
 JobSystem::Shutdown();
 ```
 
-### Wait all jobs of a tag
+#### Wait all jobs of a tag
 
 Coroutines can suspend themselfs and wait all jobs finish of a given tag before continuing. This mechanism is very similar to waiting on other coroutines but there are a few differences.
 
@@ -251,7 +281,7 @@ using namespace cw;
 
 JobCoroutine<void> SimpleCoroutineWaitTag() {
     // We can wait until the the specified tag is scheduled
-    co_await WaitOnTag(77);
+    co_await WaitForTag(77);
     // It's guaranteed that all jobs of tag 77 have finished, including functions
     co_return;
 }
@@ -330,6 +360,8 @@ JobSystem::Shutdown();
 ```
 
 ## Samples (work in progress)
+
+For now there are no samples. However you can check [Axle][Axle] to see how I use the system in a work in progress game engine.
 
 ## Benchmarks (work in progress)
 
