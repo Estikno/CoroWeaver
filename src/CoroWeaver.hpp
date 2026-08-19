@@ -362,11 +362,11 @@ namespace cw {
         }
 
 #ifdef CW_TESTING
-        const std::vector<std::thread>& GetThreadsDEBUG() const {
-            return m_Threads;
+        inline static const std::vector<std::thread>& GetThreadsDEBUG() {
+            return s_Instance->m_Threads;
         }
-        u64 GetLocalBufferNumDEBUG() const {
-            return m_LargestAvailableIndex.load(std::memory_order_acquire);
+        inline static u64 GetLocalBufferNumDEBUG() {
+            return s_Instance->m_LargestAvailableIndex.load(std::memory_order_acquire);
         }
 
 #endif // CW_TESTING
@@ -385,7 +385,7 @@ namespace cw {
         friend struct MoveToTagAwaiter;
 
         template <typename T>
-        friend struct WaitOnTagAwaiter;
+        friend struct WaitForTagAwaiter;
 
         template <typename T>
         friend struct WaitForAwaiter;
@@ -1064,10 +1064,10 @@ namespace cw {
     };
 
     template <typename T>
-    struct WaitOnTagAwaiter {
+    struct WaitForTagAwaiter {
         Tag m_Tag;
 
-        WaitOnTagAwaiter<T>(Tag tag)
+        WaitForTagAwaiter<T>(Tag tag)
             : m_Tag(tag) {}
 
         bool await_ready() noexcept {
@@ -1239,4 +1239,7 @@ namespace cw {
 #    define CW_CONVERT_TO_WORKER(name) ::cw::JobSystem::ConvertToWorkerThread()
 #endif // TRACY_ENABLE
 
+#define CW_SCHEDULE_TAG_AND_WAIT(tag)  \
+    ::cw::JobSystem::ScheduleTag(tag); \
+    co_await ::cw::WaitForTag(tag);
 #define CW_DEREGISTER_WORKER ::cw::JobSystem::DeregisterWorkerThread()

@@ -48,7 +48,7 @@ namespace cw {
     template <typename T>
     struct MoveToTagAwaiter;
     template <typename T>
-    struct WaitOnTagAwaiter;
+    struct WaitForTagAwaiter;
     struct TagWaitState;
     template <typename T>
     struct WaitForAwaiter;
@@ -223,20 +223,20 @@ namespace cw {
         return MoveToTagTag{tag};
     }
 
-    struct WaitOnTagTag {
+    struct WaitForTagTag {
         Tag m_Tag;
     };
 
-    inline WaitOnTagTag WaitOnTag(Tag tag) {
-        return WaitOnTagTag{tag};
+    inline WaitForTagTag WaitForTag(Tag tag) {
+        return WaitForTagTag{tag};
     }
 
-    struct WaitForTag {
+    struct WaitForTimeTag {
         std::chrono::milliseconds m_Time;
     };
 
-    inline WaitForTag WaitFor(std::chrono::milliseconds time) {
-        return WaitForTag{time};
+    inline WaitForTimeTag WaitFor(std::chrono::milliseconds time) {
+        return WaitForTimeTag{time};
     }
 
     /**
@@ -278,11 +278,11 @@ namespace cw {
             return MoveToTagAwaiter<T>(tag.m_Tag);
         }
 
-        WaitOnTagAwaiter<T> await_transform(WaitOnTagTag&& tag) {
-            return WaitOnTagAwaiter<T>(tag.m_Tag);
+        WaitForTagAwaiter<T> await_transform(WaitForTagTag&& tag) {
+            return WaitForTagAwaiter<T>(tag.m_Tag);
         }
 
-        WaitForAwaiter<T> await_transform(WaitForTag&& tag) {
+        WaitForAwaiter<T> await_transform(WaitForTimeTag&& tag) {
             return WaitForAwaiter<T>(tag.m_Time);
         }
 
